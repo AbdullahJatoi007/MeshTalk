@@ -1,0 +1,24 @@
+name: meshtalk
+description: Offline multi-hop mesh chat for Android (Nearby Connections + own relay layer).
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  nearby_connections: ^4.3.0
+  permission_handler: ^11.3.1
+  cryptography: ^2.7.0
+  shared_preferences: ^2.3.2
+  image_picker: ^1.1.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
