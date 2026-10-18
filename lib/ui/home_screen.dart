@@ -61,7 +61,7 @@ class _HomeScreenState extends State<HomeScreen> {
           children: [
             const Text(
                 'Every phone in the mesh gets an alert and relays it before any other message. '
-                    'Say where you are.'),
+                'Say where you are.'),
             const SizedBox(height: 12),
             TextField(
               controller: ctrl,
@@ -98,11 +98,13 @@ class _HomeScreenState extends State<HomeScreen> {
       listenable: mesh,
       builder: (context, _) {
         final peers = mesh.peers;
+        final bcCount = mesh.bitchatPeers.length;
         final status = !mesh.running
             ? 'Mesh off'
-            : mesh.linkCount == 0
-            ? 'Searching nearby…'
-            : '${mesh.linkCount} direct · ${peers.length} in mesh';
+            : mesh.linkCount == 0 && bcCount == 0
+                ? 'Searching nearby…'
+                : '${mesh.linkCount} direct · ${peers.length} in mesh'
+                    '${bcCount > 0 ? ' · $bcCount bitchat' : ''}';
 
         return Scaffold(
           appBar: AppBar(
@@ -154,12 +156,19 @@ class _HomeScreenState extends State<HomeScreen> {
                     }
                   } else if (v == 'clear') {
                     await mesh.clearHistory();
+                  } else if (v == 'bitchat') {
+                    await mesh.setBitchatEnabled(!mesh.bitchatEnabled);
                   }
                 },
                 itemBuilder: (_) => [
                   PopupMenuItem(
                       value: 'toggle',
                       child: Text(mesh.running ? 'Turn mesh off' : 'Turn mesh on')),
+                  CheckedPopupMenuItem(
+                    value: 'bitchat',
+                    checked: mesh.bitchatEnabled,
+                    child: const Text('Talk with bitchat users'),
+                  ),
                   const PopupMenuItem(value: 'clear', child: Text('Clear message history')),
                 ],
               ),
@@ -218,7 +227,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   child: const Icon(Icons.people_outline),
                 ),
                 selectedIcon: const Icon(Icons.people),
-                label: 'People (${peers.length})',
+                label: 'People (${peers.length + bcCount})',
               ),
             ],
           ),
@@ -315,16 +324,16 @@ class _PublicChat extends StatelessWidget {
         Expanded(
           child: feed.isEmpty
               ? const _Empty(
-              icon: Icons.forum_outlined,
-              title: 'No messages yet',
-              body: 'Messages here go to everyone in the mesh, '
-                  'including phones several hops away.')
+                  icon: Icons.forum_outlined,
+                  title: 'No messages yet',
+                  body: 'Messages here go to everyone in the mesh, '
+                      'including phones several hops away.')
               : ListView.builder(
-            reverse: true,
-            padding: const EdgeInsets.symmetric(vertical: 8),
-            itemCount: feed.length,
-            itemBuilder: (_, i) => MessageBubble(m: feed[feed.length - 1 - i]),
-          ),
+                  reverse: true,
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  itemCount: feed.length,
+                  itemBuilder: (_, i) => MessageBubble(m: feed[feed.length - 1 - i]),
+                ),
         ),
         Composer(
           enabled: mesh.running,
@@ -351,7 +360,8 @@ class _People extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final offline = mesh.offlineConversations;
-    if (peers.isEmpty && offline.isEmpty) {
+    final bitchat = mesh.bitchatPeers;
+    if (peers.isEmpty && offline.isEmpty && bitchat.isEmpty) {
       return const _Empty(
         icon: Icons.radar,
         title: 'Looking for people nearby',
@@ -371,6 +381,33 @@ class _People extends StatelessWidget {
             trailing: _Unread(n: mesh.unreadDm[p.nodeId] ?? 0, hops: p.hops),
             onTap: () => _open(context, p.nodeId),
           ),
+        if (bitchat.isNotEmpty || (mesh.bitchatEnabled && mesh.bitchatProblem != null)) ...[
+          const Padding(
+            padding: EdgeInsets.fromLTRB(16, 16, 16, 4),
+            child: Text('On bitchat (public chat only)'),
+          ),
+          if (mesh.bitchatProblem != null)
+            ListTile(
+              leading: const Icon(Icons.bluetooth_disabled),
+              title: const Text("Can't reach bitchat users"),
+              subtitle: Text(mesh.bitchatProblem!),
+            ),
+          for (final p in bitchat)
+            ListTile(
+              leading: Avatar(id: p.id, name: p.nickname),
+              title: Text(p.nickname),
+              subtitle: Text(
+                  '${p.isMeshTalk ? 'MeshTalk via Bluetooth' : 'bitchat'} · ${p.hops <= 1 ? 'direct' : '~${p.hops} hops'}'),
+              trailing: const Icon(Icons.bluetooth, size: 18),
+              onTap: () => ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                content: Text(p.isMeshTalk
+                    ? '${p.nickname} is only reachable over Bluetooth right now. '
+                        'Message them in Everyone.'
+                    : 'Private messages to bitchat users aren\'t supported yet. '
+                        'Write to ${p.nickname} in Everyone.'),
+              )),
+            ),
+        ],
         if (offline.isNotEmpty) ...[
           const Padding(
             padding: EdgeInsets.fromLTRB(16, 16, 16, 4),
@@ -404,7 +441,7 @@ class _Unread extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       children: List.generate(
         hops!.clamp(1, 4).toInt(),
-            (_) => const Padding(
+        (_) => const Padding(
           padding: EdgeInsets.only(left: 2),
           child: Icon(Icons.circle, size: 6),
         ),

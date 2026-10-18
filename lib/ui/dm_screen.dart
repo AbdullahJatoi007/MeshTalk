@@ -74,8 +74,8 @@ class _DmScreenState extends State<DmScreen> {
                         !reachable
                             ? 'Not in the mesh right now'
                             : peer!.hops <= 1
-                            ? 'Direct · encrypted'
-                            : '${peer.hops} hops away · encrypted',
+                                ? 'Direct · encrypted'
+                                : '${peer.hops} hops away · encrypted',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: Theme.of(context).textTheme.labelMedium,
@@ -93,10 +93,10 @@ class _DmScreenState extends State<DmScreen> {
                 onPressed: canCall
                     ? _call
                     : () => showError(
-                    context,
-                    StateError(mesh.call != null
-                        ? 'You are already in a call'
-                        : 'Calls work only when $name is in direct range (1 hop)')),
+                        context,
+                        StateError(mesh.call != null
+                            ? 'You are already in a call'
+                            : 'Calls work only when $name is in direct range (1 hop)')),
                 icon: Icon(Icons.call_outlined,
                     color: canCall ? null : Theme.of(context).disabledColor),
               ),
@@ -107,31 +107,31 @@ class _DmScreenState extends State<DmScreen> {
               Expanded(
                 child: msgs.isEmpty
                     ? Center(
-                  child: Padding(
-                    padding: const EdgeInsets.all(32),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Icon(Icons.lock_outline, size: 18),
-                        const SizedBox(width: 8),
-                        Flexible(
-                          child: Text(
-                            'Only $name can read these messages, photos and '
-                                'voice messages, even though other phones relay them.',
-                            textAlign: TextAlign.center,
+                        child: Padding(
+                          padding: const EdgeInsets.all(32),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(Icons.lock_outline, size: 18),
+                              const SizedBox(width: 8),
+                              Flexible(
+                                child: Text(
+                                  'Only $name can read these messages, photos and '
+                                  'voice messages, even though other phones relay them.',
+                                  textAlign: TextAlign.center,
+                                ),
+                              ),
+                            ],
                           ),
                         ),
-                      ],
-                    ),
-                  ),
-                )
+                      )
                     : ListView.builder(
-                  reverse: true,
-                  padding: const EdgeInsets.symmetric(vertical: 8),
-                  itemCount: msgs.length,
-                  itemBuilder: (_, i) =>
-                      MessageBubble(m: msgs[msgs.length - 1 - i], showSender: false),
-                ),
+                        reverse: true,
+                        padding: const EdgeInsets.symmetric(vertical: 8),
+                        itemCount: msgs.length,
+                        itemBuilder: (_, i) =>
+                            MessageBubble(m: msgs[msgs.length - 1 - i], showSender: false),
+                      ),
               ),
               Composer(
                 enabled: reachable,

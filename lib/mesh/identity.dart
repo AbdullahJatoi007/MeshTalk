@@ -10,11 +10,18 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// self-certifying: nobody can claim your id without your private key,
 /// and a dm can be checked against the id it says it came from.
 class Identity {
-  Identity._(this._keyPair, this.publicKey, this.nodeId);
+  Identity._(this._keyPair, this.publicKey, this.nodeId, this._signingPair,
+      this.signingPublicKey);
 
   final SimpleKeyPair _keyPair;
   final Uint8List publicKey;
   final String nodeId;
+
+  /// Ed25519 key used to sign bitchat packets. (The X25519 key above is
+  /// also the bitchat "Noise static key": bitchat derives its 8-byte peer
+  /// ID from it exactly the way MeshTalk derives [nodeId].)
+  final SimpleKeyPair _signingPair;
+  final Uint8List signingPublicKey;
 
   String get publicKeyB64 => base64Encode(publicKey);
 
@@ -22,6 +29,8 @@ class Identity {
   static final _aes = AesGcm.with256bits();
   static final _hkdf = Hkdf(hmac: Hmac.sha256(), outputLength: 32);
   static const _prefsKey = 'identity_seed_v1';
+  static const _signingPrefsKey = 'signing_seed_v1';
+  static final _ed25519 = Ed25519();
 
   /// Loads the saved key, or creates and saves a new one on first run.
   static Future<Identity> loadOrCreate() async {
@@ -36,7 +45,35 @@ class Identity {
       await prefs.setString(_prefsKey, base64Encode(seed));
     }
     final pub = Uint8List.fromList((await kp.extractPublicKey()).bytes);
-    return Identity._(kp, pub, await nodeIdFor(pub));
+
+    SimpleKeyPair sk;
+    final savedSigning = prefs.getString(_signingPrefsKey);
+    if (savedSigning != null) {
+      sk = await _ed25519.newKeyPairFromSeed(base64Decode(savedSigning));
+    } else {
+      sk = await _ed25519.newKeyPair();
+      await prefs.setString(
+          _signingPrefsKey, base64Encode(await sk.extractPrivateKeyBytes()));
+    }
+    final signPub = Uint8List.fromList((await sk.extractPublicKey()).bytes);
+    return Identity._(kp, pub, await nodeIdFor(pub), sk, signPub);
+  }
+
+  /// Ed25519 signature (64 bytes) over [message].
+  Future<Uint8List> sign(List<int> message) async {
+    final s = await _ed25519.sign(message, keyPair: _signingPair);
+    return Uint8List.fromList(s.bytes);
+  }
+
+  static Future<bool> verifySignature(
+      List<int> message, List<int> signature, List<int> publicKey) async {
+    try {
+      return await _ed25519.verify(message,
+          signature: Signature(signature,
+              publicKey: SimplePublicKey(publicKey, type: KeyPairType.ed25519)));
+    } catch (_) {
+      return false;
+    }
   }
 
   static Future<String> nodeIdFor(List<int> publicKey) async {
@@ -55,7 +92,7 @@ class Identity {
     final remote = SimplePublicKey(base64Decode(peerPubB64),
         type: KeyPairType.x25519);
     final shared =
-    await _x25519.sharedSecretKey(keyPair: _keyPair, remotePublicKey: remote);
+        await _x25519.sharedSecretKey(keyPair: _keyPair, remotePublicKey: remote);
     final key = await _hkdf.deriveKey(
       secretKey: shared,
       nonce: utf8.encode('meshtalk-v1'),
@@ -69,7 +106,7 @@ class Identity {
   /// [aad] binds the ciphertext to (src, dst, packet id) so it can't be
   /// replayed under another header.
   Future<Map<String, dynamic>> encrypt(
-      String text, String peerPubB64, String aad) =>
+          String text, String peerPubB64, String aad) =>
       encryptBytes(utf8.encode(text), peerPubB64, aad);
 
   /// Same as [encrypt] for raw bytes (photo / voice chunks).
@@ -77,7 +114,7 @@ class Identity {
       List<int> data, String peerPubB64, String aad) async {
     final key = await _keyWith(peerPubB64);
     final box =
-    await _aes.encrypt(data, secretKey: key, aad: utf8.encode(aad));
+        await _aes.encrypt(data, secretKey: key, aad: utf8.encode(aad));
     return {
       'pk': publicKeyB64,
       'n': base64Encode(box.nonce),
@@ -112,7 +149,7 @@ class Identity {
         mac: Mac(base64Decode(body['m'] as String)),
       );
       final clear =
-      await _aes.decrypt(box, secretKey: key, aad: utf8.encode(aad));
+          await _aes.decrypt(box, secretKey: key, aad: utf8.encode(aad));
       return Uint8List.fromList(clear);
     } catch (_) {
       return null;

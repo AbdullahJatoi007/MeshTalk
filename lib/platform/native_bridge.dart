@@ -72,7 +72,7 @@ class NativeBridge {
 
   /// Posts a notification (used for SOS, private messages, calls).
   static Future<void> notify(String title, String body,
-      {bool urgent = false}) =>
+          {bool urgent = false}) =>
       _invoke<void>(
           'notify', {'title': title, 'body': body, 'urgent': urgent});
 

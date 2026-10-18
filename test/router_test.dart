@@ -71,7 +71,7 @@ class FakeTransport implements MeshTransport {
 String nid(int n) => n.toRadixString(16).padLeft(16, '0');
 
 Packet pkt(String src, String type,
-    {String? dst, int ttl = 7, Map<String, dynamic>? body, int? ts}) =>
+        {String? dst, int ttl = 7, Map<String, dynamic>? body, int? ts}) =>
     Packet(
       id: Packet.newId(),
       type: type,
@@ -228,27 +228,27 @@ void main() {
   });
 
   test('store-and-forward: a phone that joins later still gets recent messages',
-          () async {
-        final m = Mesh();
-        final a = nid(1), b = nid(2), c = nid(3);
-        for (final id in [a, b, c]) {
-          m.add(id);
-        }
-        m.net.connect(a, b);
-        await settle();
-        m.routers[a]!.send(pkt(a, PacketType.chat, body: {'x': 'before C arrived'}));
-        m.routers[a]!.send(pkt(a, PacketType.ann, body: {'pk': 'k'}));
-        await settle();
-        expect(m.of(c, PacketType.chat), isEmpty);
+      () async {
+    final m = Mesh();
+    final a = nid(1), b = nid(2), c = nid(3);
+    for (final id in [a, b, c]) {
+      m.add(id);
+    }
+    m.net.connect(a, b);
+    await settle();
+    m.routers[a]!.send(pkt(a, PacketType.chat, body: {'x': 'before C arrived'}));
+    m.routers[a]!.send(pkt(a, PacketType.ann, body: {'pk': 'k'}));
+    await settle();
+    expect(m.of(c, PacketType.chat), isEmpty);
 
-        m.net.connect(b, c); // C walks into B's range
-        await settle();
-        final got = m.of(c, PacketType.chat);
-        expect(got.length, 1);
-        expect(got.single.body['x'], 'before C arrived');
-        expect(got.single.hops + 1, 2);
-        expect(m.of(c, PacketType.ann), isEmpty, reason: 'announcements are not replayed');
-      });
+    m.net.connect(b, c); // C walks into B's range
+    await settle();
+    final got = m.of(c, PacketType.chat);
+    expect(got.length, 1);
+    expect(got.single.body['x'], 'before C arrived');
+    expect(got.single.hops + 1, 2);
+    expect(m.of(c, PacketType.ann), isEmpty, reason: 'announcements are not replayed');
+  });
 
   test('SOS jumps the queue ahead of chat', () async {
     final m = Mesh();
@@ -308,68 +308,68 @@ void main() {
   });
 
   test('call audio frames go to the direct neighbour only, never relayed',
-          () async {
-        final m = Mesh();
-        final a = nid(1), b = nid(2), c = nid(3);
-        for (final id in [a, b, c]) {
-          m.add(id);
-        }
-        final rawB = <Uint8List>[], rawC = <Uint8List>[];
-        m.routers[b]!.onRawFrame = (_, d) => rawB.add(d);
-        m.routers[c]!.onRawFrame = (_, d) => rawC.add(d);
-        m.net.connect(a, b);
-        m.net.connect(b, c);
-        await settle();
+      () async {
+    final m = Mesh();
+    final a = nid(1), b = nid(2), c = nid(3);
+    for (final id in [a, b, c]) {
+      m.add(id);
+    }
+    final rawB = <Uint8List>[], rawC = <Uint8List>[];
+    m.routers[b]!.onRawFrame = (_, d) => rawB.add(d);
+    m.routers[c]!.onRawFrame = (_, d) => rawC.add(d);
+    m.net.connect(a, b);
+    m.net.connect(b, c);
+    await settle();
 
-        final ra = m.routers[a]!;
-        final link = ra.linkFor(b)!;
-        expect(ra.linkFor(c), isNull, reason: 'C is 2 hops away');
-        final frame = Uint8List.fromList([kRawFrameMarker, 1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 9, 9]);
-        await ra.sendRaw(link, frame);
-        await settle();
-        expect(rawB.length, 1);
-        expect(rawB.single, frame);
-        expect(rawC, isEmpty);
-        expect(m.got[b], isEmpty, reason: 'raw frames are not packets');
-      });
+    final ra = m.routers[a]!;
+    final link = ra.linkFor(b)!;
+    expect(ra.linkFor(c), isNull, reason: 'C is 2 hops away');
+    final frame = Uint8List.fromList([kRawFrameMarker, 1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 9, 9]);
+    await ra.sendRaw(link, frame);
+    await settle();
+    expect(rawB.length, 1);
+    expect(rawB.single, frame);
+    expect(rawC, isEmpty);
+    expect(m.got[b], isEmpty, reason: 'raw frames are not packets');
+  });
 
   test('photo chunks and call signals are not replayed to late joiners',
-          () async {
-        final m = Mesh();
-        final a = nid(1), b = nid(2), c = nid(3);
-        for (final id in [a, b, c]) {
-          m.add(id);
-        }
-        m.net.connect(a, b);
-        await settle();
-        m.routers[a]!.send(pkt(a, PacketType.blob,
-            body: {'mid': nid(99), 'k': 'img', 'i': 0, 'cnt': 1, 'd': 'AAAA'}));
-        m.routers[a]!.send(pkt(a, PacketType.chat, body: {'x': 'hello'}));
-        await settle();
-        expect(m.of(b, PacketType.blob).length, 1, reason: 'live delivery works');
+      () async {
+    final m = Mesh();
+    final a = nid(1), b = nid(2), c = nid(3);
+    for (final id in [a, b, c]) {
+      m.add(id);
+    }
+    m.net.connect(a, b);
+    await settle();
+    m.routers[a]!.send(pkt(a, PacketType.blob,
+        body: {'mid': nid(99), 'k': 'img', 'i': 0, 'cnt': 1, 'd': 'AAAA'}));
+    m.routers[a]!.send(pkt(a, PacketType.chat, body: {'x': 'hello'}));
+    await settle();
+    expect(m.of(b, PacketType.blob).length, 1, reason: 'live delivery works');
 
-        m.net.connect(b, c);
-        await settle();
-        expect(m.of(c, PacketType.chat).length, 1, reason: 'text is replayed');
-        expect(m.of(c, PacketType.blob), isEmpty, reason: 'media is not');
-      });
+    m.net.connect(b, c);
+    await settle();
+    expect(m.of(c, PacketType.chat).length, 1, reason: 'text is replayed');
+    expect(m.of(c, PacketType.blob), isEmpty, reason: 'media is not');
+  });
 
   test('call signal with ttl 1 reaches the neighbour but goes no further',
-          () async {
-        final m = Mesh();
-        final a = nid(1), b = nid(2), c = nid(3);
-        for (final id in [a, b, c]) {
-          m.add(id);
-        }
-        m.net.connect(a, b);
-        m.net.connect(b, c);
-        await settle();
-        m.routers[a]!.send(pkt(a, PacketType.call, dst: b, ttl: 1, body: {'a': 'offer', 'c': nid(7)}));
-        m.routers[a]!.send(pkt(a, PacketType.call, dst: c, ttl: 1, body: {'a': 'offer', 'c': nid(8)}));
-        await settle();
-        expect(m.of(b, PacketType.call).length, 1);
-        expect(m.of(c, PacketType.call), isEmpty);
-      });
+      () async {
+    final m = Mesh();
+    final a = nid(1), b = nid(2), c = nid(3);
+    for (final id in [a, b, c]) {
+      m.add(id);
+    }
+    m.net.connect(a, b);
+    m.net.connect(b, c);
+    await settle();
+    m.routers[a]!.send(pkt(a, PacketType.call, dst: b, ttl: 1, body: {'a': 'offer', 'c': nid(7)}));
+    m.routers[a]!.send(pkt(a, PacketType.call, dst: c, ttl: 1, body: {'a': 'offer', 'c': nid(8)}));
+    await settle();
+    expect(m.of(b, PacketType.call).length, 1);
+    expect(m.of(c, PacketType.call), isEmpty);
+  });
 
   group('media', () {
     test('split + reassemble in any order, duplicates harmless', () {

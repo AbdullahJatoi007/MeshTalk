@@ -39,7 +39,7 @@ Future<PermissionResult> requestMeshPermissions() async {
   if (sdk >= 33) await Permission.notification.request();
 
   final denied = statuses.entries
-  // In the unknown-SDK fallback, location is a guess: don't block on it.
+      // In the unknown-SDK fallback, location is a guess: don't block on it.
       .where((e) => !e.value.isGranted && !(unknown && e.key == Permission.location))
       .toList();
   if (denied.isNotEmpty) {

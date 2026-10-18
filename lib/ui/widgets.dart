@@ -264,7 +264,7 @@ class _ComposerState extends State<Composer> {
               onPressed: widget.enabled && !_busy && !empty ? _sendText : null,
               icon: _busy
                   ? const SizedBox(
-                  width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                      width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
                   : const Icon(Icons.send_rounded),
             );
           },
@@ -336,7 +336,7 @@ class MessageBubble extends StatelessWidget {
     final fg = m.mine ? cs.onPrimaryContainer : cs.onSurface;
     final meta = <String>[
       timeLabel(m.ts),
-      if (!m.mine) '${m.hops} hop${m.hops == 1 ? '' : 's'}',
+      if (!m.mine) m.viaBitchat ? 'bitchat' : '${m.hops} hop${m.hops == 1 ? '' : 's'}',
     ].join(' · ');
 
     final Widget content;
@@ -407,8 +407,8 @@ class MessageBubble extends StatelessWidget {
 /// True when a half-received photo / voice message won't complete any more.
 bool _stalled(ChatMessage m) =>
     m.path == null &&
-        !m.mine &&
-        DateTime.now().millisecondsSinceEpoch - m.ts > kAssemblyTimeoutMs;
+    !m.mine &&
+    DateTime.now().millisecondsSinceEpoch - m.ts > kAssemblyTimeoutMs;
 
 class _ImageContent extends StatelessWidget {
   const _ImageContent({required this.m, required this.fg});
@@ -460,19 +460,19 @@ class _ImageContent extends StatelessWidget {
   }
 
   Widget _placeholder(double w, IconData icon, String label) => SizedBox(
-    width: w,
-    height: 110,
-    child: Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, color: fg.withValues(alpha: 0.6)),
-          const SizedBox(height: 6),
-          Text(label, style: TextStyle(color: fg.withValues(alpha: 0.7))),
-        ],
-      ),
-    ),
-  );
+        width: w,
+        height: 110,
+        child: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, color: fg.withValues(alpha: 0.6)),
+              const SizedBox(height: 6),
+              Text(label, style: TextStyle(color: fg.withValues(alpha: 0.7))),
+            ],
+          ),
+        ),
+      );
 }
 
 class _VoiceContent extends StatelessWidget {

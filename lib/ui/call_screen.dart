@@ -69,7 +69,7 @@ class _CallScreenState extends State<CallScreen> {
           CallPhase.outgoing => 'Calling…',
           CallPhase.incoming => 'Incoming voice call',
           CallPhase.active =>
-              durationLabel(DateTime.now().millisecondsSinceEpoch - (c.startedAt ?? 0)),
+            durationLabel(DateTime.now().millisecondsSinceEpoch - (c.startedAt ?? 0)),
         };
         final peer = mesh.peer(c.peerId);
 

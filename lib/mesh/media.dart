@@ -85,7 +85,7 @@ class MediaAssembler {
     if (bytes.isEmpty || bytes.length > kChunkBytes) return null;
     final m = _pending.putIfAbsent(
       mediaId,
-          () => IncomingMedia(
+      () => IncomingMedia(
           mediaId: mediaId, kind: kind, total: total, src: src, firstSeen: now),
     );
     // A chunk claiming the same id with different shape or sender: ignore it.

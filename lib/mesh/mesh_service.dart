@@ -7,6 +7,10 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:cryptography/dart.dart';
+
+import '../bitchat/bc_mesh.dart';
+import '../platform/ble_bridge.dart';
 import '../platform/native_bridge.dart';
 import 'identity.dart';
 import 'media.dart';
@@ -40,6 +44,9 @@ class ChatMessage {
   /// Voice message length.
   final int durMs;
 
+  /// 'bitchat' when the message came over the bitchat Bluetooth network.
+  final String? via;
+
   ChatMessage({
     required this.id,
     required this.kind,
@@ -55,33 +62,36 @@ class ChatMessage {
     this.path,
     this.progress = 1,
     this.durMs = 0,
+    this.via,
   });
 
   bool get isMedia => media != null;
+  bool get viaBitchat => via == 'bitchat';
 
   /// Short text for notifications and conversation lists.
   String get preview => media == MediaKind.image
       ? '📷 Photo'
       : media == MediaKind.voice
-      ? '🎤 Voice message'
-      : text;
+          ? '🎤 Voice message'
+          : text;
 
   Map<String, dynamic> toJson() => {
-    'id': id,
-    'k': kind.name,
-    if (peerId != null) 'p': peerId,
-    'f': fromId,
-    'fn': fromName,
-    'x': text,
-    'ts': ts,
-    'm': mine,
-    'h': hops,
-    'd': delivered,
-    if (media != null) 'md': media,
-    if (path != null) 'pa': path,
-    if (media != null) 'pr': progress,
-    if (durMs > 0) 'du': durMs,
-  };
+        'id': id,
+        'k': kind.name,
+        if (peerId != null) 'p': peerId,
+        'f': fromId,
+        'fn': fromName,
+        'x': text,
+        'ts': ts,
+        'm': mine,
+        'h': hops,
+        'd': delivered,
+        if (media != null) 'md': media,
+        if (path != null) 'pa': path,
+        if (media != null) 'pr': progress,
+        if (durMs > 0) 'du': durMs,
+        if (via != null) 'v': via,
+      };
 
   static ChatMessage? fromJson(Map<String, dynamic> j) {
     try {
@@ -100,6 +110,7 @@ class ChatMessage {
         path: j['pa'] as String?,
         progress: ((j['pr'] as num?) ?? 1).toDouble(),
         durMs: (j['du'] as int?) ?? 0,
+        via: j['v'] as String?,
       );
     } catch (_) {
       return null;
@@ -141,6 +152,10 @@ class MeshService extends ChangeNotifier with WidgetsBindingObserver {
   static const _maxStored = 500;
   static const _ringTimeoutMs = 30000;
   static const _callSilenceMs = 8000;
+  static const _bitchatKey = 'bitchat_enabled_v1';
+
+  /// Largest bitchat packet we carry across Nearby (text-sized traffic).
+  static const _maxBridgeBytes = 8000;
 
   final Identity identity;
   final SharedPreferences _prefs;
@@ -163,6 +178,13 @@ class MeshService extends ChangeNotifier with WidgetsBindingObserver {
 
   final MediaAssembler _assembler = MediaAssembler();
 
+  // ── bitchat compatibility (Bluetooth LE, public chat) ──
+  BitchatMesh? _bitchat;
+  bool bitchatEnabled = true;
+
+  /// Why bitchat can't run right now (Bluetooth off, permission…), or null.
+  String? bitchatProblem;
+
   CallSession? call;
   String? _callEndedReason;
   StreamSubscription<Uint8List>? _frameSub;
@@ -176,6 +198,7 @@ class MeshService extends ChangeNotifier with WidgetsBindingObserver {
     final dir = await NativeBridge.filesDir() ?? Directory.systemTemp.path;
     await MediaStore.init(dir);
     final s = MeshService._(id, prefs, prefs.getString(_nickKey));
+    s.bitchatEnabled = prefs.getBool(_bitchatKey) ?? true;
     s._loadMessages();
     WidgetsBinding.instance.addObserver(s);
     return s;
@@ -187,6 +210,7 @@ class MeshService extends ChangeNotifier with WidgetsBindingObserver {
     final v = value.trim();
     nick = v.length > 20 ? v.substring(0, 20) : v;
     await _prefs.setString(_nickKey, nick!);
+    _bitchat?.sendAnnounce();
     notifyListeners();
   }
 
@@ -214,9 +238,10 @@ class MeshService extends ChangeNotifier with WidgetsBindingObserver {
     _announceTimer =
         Timer.periodic(const Duration(seconds: 30), (_) => _announce());
     _pruneTimer = Timer.periodic(const Duration(minutes: 1),
-            (_) => _assembler.prune(DateTime.now().millisecondsSinceEpoch));
+        (_) => _assembler.prune(DateTime.now().millisecondsSinceEpoch));
     _announce();
     await NativeBridge.startService();
+    if (bitchatEnabled) await _startBitchat();
     notifyListeners();
   }
 
@@ -224,6 +249,7 @@ class MeshService extends ChangeNotifier with WidgetsBindingObserver {
     if (!running) return;
     if (call != null) endCall('Mesh turned off');
     running = false;
+    await _stopBitchat();
     _announceTimer?.cancel();
     _pruneTimer?.cancel();
     await _inSub?.cancel();
@@ -260,7 +286,7 @@ class MeshService extends ChangeNotifier with WidgetsBindingObserver {
   List<PeerInfo> get peers {
     final list = _router?.peers.values.toList() ?? <PeerInfo>[];
     list.sort((a, b) =>
-    a.hops != b.hops ? a.hops - b.hops : a.name.compareTo(b.name));
+        a.hops != b.hops ? a.hops - b.hops : a.name.compareTo(b.name));
     return list;
   }
 
@@ -308,10 +334,10 @@ class MeshService extends ChangeNotifier with WidgetsBindingObserver {
   // ── sending: text ─────────────────────────────────────────────────────
 
   Packet _packet(String type,
-      {String? id,
-        String? dst,
-        int? ttl,
-        Map<String, dynamic> body = const {}}) =>
+          {String? id,
+          String? dst,
+          int? ttl,
+          Map<String, dynamic> body = const {}}) =>
       Packet(
         id: id ?? Packet.newId(),
         type: type,
@@ -332,9 +358,17 @@ class MeshService extends ChangeNotifier with WidgetsBindingObserver {
     return t.length > maxTextLength ? t.substring(0, maxTextLength) : t;
   }
 
-  void sendPublic(String text) => _sendBroadcast(PacketType.chat, text);
+  void sendPublic(String text) {
+    _sendBroadcast(PacketType.chat, text);
+    _bitchat?.sendPublic(_clip(text)); // also reaches bitchat users
+  }
 
-  void sendSos(String text) => _sendBroadcast(PacketType.sos, text);
+  void sendSos(String text) {
+    _sendBroadcast(PacketType.sos, text);
+    // bitchat has no SOS type: it arrives there as a public message.
+    final t = _clip(text);
+    if (t.isNotEmpty) _bitchat?.sendPublic('🆘 SOS: $t');
+  }
 
   void _sendBroadcast(String type, String text) {
     final t = _clip(text);
@@ -367,7 +401,7 @@ class MeshService extends ChangeNotifier with WidgetsBindingObserver {
     final peer = _reachable(peerId);
     final id = Packet.newId();
     final body =
-    await identity.encrypt(t, peer.pubKey, _aad(selfId, peerId, id));
+        await identity.encrypt(t, peer.pubKey, _aad(selfId, peerId, id));
     final p = _packet(PacketType.dm, id: id, dst: peerId, body: body);
     _router!.send(p);
     _add(ChatMessage(
@@ -467,6 +501,7 @@ class MeshService extends ChangeNotifier with WidgetsBindingObserver {
       case PacketType.chat:
         final t = _text(p);
         if (t == null) return;
+        _dropBitchatCopies(p.src, t);
         _add(ChatMessage(
           id: p.id,
           kind: MessageKind.public,
@@ -505,7 +540,7 @@ class MeshService extends ChangeNotifier with WidgetsBindingObserver {
         if (p.dst != selfId) return;
         if (!_byId.containsKey(p.id)) {
           final t =
-          await identity.decrypt(p.body, p.src, _aad(p.src, selfId, p.id));
+              await identity.decrypt(p.body, p.src, _aad(p.src, selfId, p.id));
           if (t == null) return; // forged or tampered
           _add(ChatMessage(
             id: p.id,
@@ -540,6 +575,14 @@ class MeshService extends ChangeNotifier with WidgetsBindingObserver {
 
       case PacketType.call:
         _onCallSignal(p);
+        break;
+
+      case PacketType.bc:
+        final raw = p.body['p'];
+        if (raw is! String || _bitchat == null) return;
+        try {
+          _bitchat!.injectFromBridge(base64Decode(raw));
+        } catch (_) {}
         break;
     }
   }
@@ -576,7 +619,7 @@ class MeshService extends ChangeNotifier with WidgetsBindingObserver {
       final e = b['e'];
       if (e is! Map<String, dynamic>) return;
       bytes =
-      await identity.decryptBytes(e, p.src, _aad(p.src, selfId, p.id));
+          await identity.decryptBytes(e, p.src, _aad(p.src, selfId, p.id));
     } else {
       final d = b['d'];
       if (d is! String) return;
@@ -640,9 +683,9 @@ class MeshService extends ChangeNotifier with WidgetsBindingObserver {
   /// Calls need a direct link: audio is never relayed through other phones.
   bool canCall(String peerId) =>
       running &&
-          call == null &&
-          _router?.peers[peerId]?.hops == 1 &&
-          _router?.linkFor(peerId) != null;
+      call == null &&
+      _router?.peers[peerId]?.hops == 1 &&
+      _router?.linkFor(peerId) != null;
 
   /// Why the last call ended (shown once by the UI, then cleared).
   String? takeCallEndedReason() {
@@ -854,6 +897,152 @@ class MeshService extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
   }
 
+  // ── bitchat compatibility ─────────────────────────────────────────────
+  // Public chat with bitchat users over Bluetooth LE. Everything else
+  // (Nearby mesh, photos, voice, calls, private messages) is unchanged.
+
+  int get bitchatLinkCount => _bitchat?.linkCount ?? 0;
+
+  /// bitchat-network people who aren't already in the MeshTalk peer list.
+  List<BcPeer> get bitchatPeers {
+    final mine = _router?.peers.keys.toSet() ?? <String>{};
+    final list = (_bitchat?.peers.values ?? const <BcPeer>[])
+        .where((p) => p.id != selfId && !mine.contains(p.id))
+        .toList()
+      ..sort((a, b) => a.hops != b.hops ? a.hops - b.hops : a.nickname.compareTo(b.nickname));
+    return list;
+  }
+
+  Future<void> setBitchatEnabled(bool on) async {
+    bitchatEnabled = on;
+    await _prefs.setBool(_bitchatKey, on);
+    if (!running) {
+      notifyListeners();
+      return;
+    }
+    if (on) {
+      await _startBitchat();
+    } else {
+      await _stopBitchat();
+    }
+    notifyListeners();
+  }
+
+  Future<void> _startBitchat() async {
+    if (_bitchat != null) return;
+    final ble = BleBitchatTransport();
+    final b = BitchatMesh(
+      selfId: selfId,
+      noiseKey: identity.publicKey,
+      signingKey: identity.signingPublicKey,
+      sign: identity.sign,
+      verify: Identity.verifySignature,
+      transport: ble,
+      nickname: () => nick ?? 'meshtalk',
+    );
+    ble.onState = (problem) {
+      if (problem != bitchatProblem) {
+        bitchatProblem = problem;
+        notifyListeners();
+      }
+    };
+    b.onPeersChanged = () {
+      _updateServiceText();
+      notifyListeners();
+    };
+    b.onPublicMessage = _onBitchatMessage;
+    b.onBridgeOut = _bridgeOut;
+    _bitchat = b;
+    try {
+      await b.start();
+    } catch (e) {
+      debugPrint('bitchat start failed: $e');
+    }
+  }
+
+  Future<void> _stopBitchat() async {
+    final b = _bitchat;
+    _bitchat = null;
+    for (final t in _heldBitchat.values) {
+      t.cancel();
+    }
+    _heldBitchat.clear();
+    bitchatProblem = null;
+    if (b != null) await b.stop();
+  }
+
+  /// Carries a bitchat packet across the Nearby mesh. The MeshTalk packet
+  /// id comes from the bitchat dedup key, so several MeshTalk phones
+  /// bridging the same packet produce one Nearby flood, not several.
+  void _bridgeOut(Uint8List encoded, String dedupKey) {
+    final r = _router;
+    if (r == null || encoded.length > _maxBridgeBytes) return;
+    final id = _hex8(const DartSha256().hashSync(utf8.encode(dedupKey)).bytes);
+    r.send(_packet(PacketType.bc, id: id, body: {'p': base64Encode(encoded)}));
+  }
+
+  static String _hex8(List<int> b) =>
+      b.take(8).map((x) => x.toRadixString(16).padLeft(2, '0')).join();
+
+  /// bitchat copies of messages from MeshTalk phones, held briefly in case
+  /// the same message also arrives over Nearby (then only one is shown).
+  final Map<String, Timer> _heldBitchat = {};
+  final Map<String, BcPublicMessage> _heldMessages = {};
+
+  void _onBitchatMessage(BcPublicMessage m) {
+    if (m.senderId == selfId) return;
+    if (m.fromMeshTalk) {
+      if (_hasNearbyCopy(m.senderId, m.text, m.timestamp)) return;
+      if (_heldBitchat.containsKey(m.key)) return;
+      _heldMessages[m.key] = m;
+      _heldBitchat[m.key] = Timer(const Duration(seconds: 4), () {
+        _heldBitchat.remove(m.key);
+        final held = _heldMessages.remove(m.key);
+        if (held != null && !_hasNearbyCopy(held.senderId, held.text, held.timestamp)) {
+          _showBitchat(held);
+        }
+      });
+      return;
+    }
+    _showBitchat(m);
+  }
+
+  void _showBitchat(BcPublicMessage m) {
+    final id = _hex8(const DartSha256().hashSync(utf8.encode(m.key)).bytes);
+    _add(ChatMessage(
+      id: id,
+      kind: MessageKind.public,
+      fromId: m.senderId,
+      fromName: m.nickname,
+      text: m.text,
+      ts: m.timestamp,
+      mine: false,
+      hops: m.hops,
+      via: 'bitchat',
+    ));
+  }
+
+  /// A MeshTalk sender's long message reaches bitchat as several parts, so
+  /// "same message" means the Nearby text contains the bitchat text.
+  bool _hasNearbyCopy(String sender, String text, int ts) => _messages.any((x) =>
+      x.kind == MessageKind.public &&
+      !x.viaBitchat &&
+      x.fromId == sender &&
+      x.text.contains(text) &&
+      (x.ts - ts).abs() < 10 * 60 * 1000);
+
+  /// A Nearby chat arrived: forget bitchat copies of it that are waiting.
+  void _dropBitchatCopies(String sender, String text) {
+    final drop = _heldMessages.entries
+        .where((e) => e.value.senderId == sender && text.contains(e.value.text))
+        .map((e) => e.key)
+        .toList();
+    for (final k in drop) {
+      _heldMessages.remove(k);
+      _heldBitchat.remove(k)?.cancel();
+    }
+  }
+
   // ── message list ──────────────────────────────────────────────────────
 
   void _add(ChatMessage m) {
@@ -911,8 +1100,10 @@ class MeshService extends ChangeNotifier with WidgetsBindingObserver {
 
   void _updateServiceText() {
     final n = _router?.peers.length ?? 0;
+    final bc = bitchatPeers.length;
     final text =
-        '$linkCount direct link${linkCount == 1 ? '' : 's'} · $n ${n == 1 ? 'person' : 'people'} in mesh';
+        '$linkCount direct link${linkCount == 1 ? '' : 's'} · $n ${n == 1 ? 'person' : 'people'} in mesh'
+        '${bc > 0 ? ' · $bc on bitchat' : ''}';
     if (text == _lastServiceText) return;
     _lastServiceText = text;
     NativeBridge.updateService(text);

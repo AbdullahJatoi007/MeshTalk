@@ -13,6 +13,8 @@ class MainActivity : FlutterActivity() {
     private var frameSink: EventChannel.EventSink? = null
     private var callAudio: CallAudio? = null
     private var voice: VoiceNotes? = null
+    private var bleSink: EventChannel.EventSink? = null
+    private var ble: BitchatBle? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -38,6 +40,19 @@ class MainActivity : FlutterActivity() {
 
                 override fun onCancel(arguments: Any?) {
                     frameSink = null
+                }
+            }
+        )
+
+        // bitchat-compatible Bluetooth LE links -> Dart.
+        EventChannel(messenger, "meshtalk/ble_events").setStreamHandler(
+            object : EventChannel.StreamHandler {
+                override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                    bleSink = events
+                }
+
+                override fun onCancel(arguments: Any?) {
+                    bleSink = null
                 }
             }
         )
@@ -154,6 +169,25 @@ class MainActivity : FlutterActivity() {
                         result.success(null)
                     }
 
+                    // ── bitchat Bluetooth LE ─────────────────────────────
+                    "bleStart" -> {
+                        val b = ble ?: BitchatBle(this) { event -> bleSink?.success(event) }
+                            .also { ble = it }
+                        b.start()
+                        result.success(null)
+                    }
+
+                    "bleStop" -> {
+                        ble?.stop()
+                        result.success(null)
+                    }
+
+                    "bleSend" -> {
+                        val link = call.argument<String>("link")
+                        val data = call.argument<ByteArray>("data")
+                        result.success(link != null && data != null && (ble?.send(link, data) ?: false))
+                    }
+
                     else -> result.notImplemented()
                 }
             } catch (e: Exception) {
@@ -163,6 +197,8 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onDestroy() {
+        ble?.stop()
+        ble = null
         callAudio?.stop()
         callAudio = null
         voice?.release()

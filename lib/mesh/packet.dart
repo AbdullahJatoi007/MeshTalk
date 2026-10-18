@@ -27,7 +27,11 @@ class PacketType {
   /// ttl 1: calls are only between phones in direct range.
   static const call = 'call';
 
-  static const all = {ann, chat, sos, dm, ack, blob, call};
+  /// A bitchat packet (base64 in `p`) carried across the Nearby mesh, so
+  /// MeshTalk phones far from any bitchat user still bridge both networks.
+  static const bc = 'bc';
+
+  static const all = {ann, chat, sos, dm, ack, blob, call, bc};
 }
 
 /// Largest encoded packet we accept or relay. Keeps the flood cheap.
@@ -84,6 +88,7 @@ class Packet {
       case PacketType.call:
         return 1;
       case PacketType.chat:
+      case PacketType.bc:
         return 2;
       case PacketType.ann:
         return 3;
@@ -94,29 +99,29 @@ class Packet {
 
   /// The copy a relay sends on: one hop further, one hop less to live.
   Packet forwarded() => Packet(
-    id: id,
-    type: type,
-    src: src,
-    srcName: srcName,
-    dst: dst,
-    ttl: ttl - 1,
-    hops: hops + 1,
-    ts: ts,
-    body: body,
-  );
+        id: id,
+        type: type,
+        src: src,
+        srcName: srcName,
+        dst: dst,
+        ttl: ttl - 1,
+        hops: hops + 1,
+        ts: ts,
+        body: body,
+      );
 
   Map<String, dynamic> toJson() => {
-    'v': 1,
-    'id': id,
-    't': type,
-    's': src,
-    'n': srcName,
-    if (dst != null) 'd': dst,
-    'ttl': ttl,
-    'h': hops,
-    'ts': ts,
-    'b': body,
-  };
+        'v': 1,
+        'id': id,
+        't': type,
+        's': src,
+        'n': srcName,
+        if (dst != null) 'd': dst,
+        'ttl': ttl,
+        'h': hops,
+        'ts': ts,
+        'b': body,
+      };
 
   Uint8List encode() => Uint8List.fromList(utf8.encode(jsonEncode(toJson())));
 
