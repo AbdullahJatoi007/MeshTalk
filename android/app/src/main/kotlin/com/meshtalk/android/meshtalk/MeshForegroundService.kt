@@ -22,6 +22,7 @@ class MeshForegroundService : Service() {
     companion object {
         const val EXTRA_TEXT = "text"
         const val EXTRA_MIC = "mic"
+        const val EXTRA_LOCATION = "location"
         const val NOTIFICATION_ID = 1001
 
         @Volatile
@@ -29,6 +30,9 @@ class MeshForegroundService : Service() {
 
         @Volatile
         private var micActive = false
+
+        @Volatile
+        private var locationActive = false
 
         @Volatile
         private var lastText = "Relaying messages for people nearby"
@@ -41,14 +45,26 @@ class MeshForegroundService : Service() {
         if (intent?.hasExtra(EXTRA_MIC) == true) {
             micActive = intent.getBooleanExtra(EXTRA_MIC, false)
         }
-        val notification = MeshNotifications.ongoing(
-            this, if (micActive) "Call in progress · $lastText" else lastText)
+        if (intent?.hasExtra(EXTRA_LOCATION) == true) {
+            locationActive = intent.getBooleanExtra(EXTRA_LOCATION, false)
+        }
+        val prefix = when {
+            micActive -> "Call in progress · "
+            locationActive -> "Sharing SOS location · "
+            else -> ""
+        }
+        val notification = MeshNotifications.ongoing(this, prefix + lastText)
 
-        if (tryForeground(notification, micActive)) {
+        // Try the requested types, then drop the optional ones one by one if
+        // Android refuses them (e.g. a permission is missing).
+        if (tryForeground(notification, micActive, locationActive)) {
             running = true
-        } else if (micActive && tryForeground(notification, false)) {
-            // Microphone type refused (e.g. permission missing): keep the mesh alive anyway.
+        } else if (locationActive && tryForeground(notification, micActive, false)) {
+            locationActive = false
+            running = true
+        } else if (micActive && tryForeground(notification, false, false)) {
             micActive = false
+            locationActive = false
             running = true
         } else {
             // e.g. started from the background on Android 12+. The mesh still
@@ -60,12 +76,15 @@ class MeshForegroundService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun tryForeground(notification: android.app.Notification, mic: Boolean): Boolean =
+    private fun tryForeground(notification: android.app.Notification, mic: Boolean, loc: Boolean): Boolean =
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
                 if (mic && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                     type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                }
+                if (loc) {
+                    type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
                 }
                 startForeground(NOTIFICATION_ID, notification, type)
             } else {
@@ -80,6 +99,7 @@ class MeshForegroundService : Service() {
         // App swiped away from recents: the Flutter engine is gone, so stop.
         running = false
         micActive = false
+        locationActive = false
         stopSelf()
         super.onTaskRemoved(rootIntent)
     }
@@ -87,6 +107,7 @@ class MeshForegroundService : Service() {
     override fun onDestroy() {
         running = false
         micActive = false
+        locationActive = false
         super.onDestroy()
     }
 }

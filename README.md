@@ -75,6 +75,8 @@ hiking and remote areas · schools and campuses · anywhere the network is down,
 | 💬 **Public chat** | One room for everyone in the mesh | Whole mesh (up to 7 hops) |
 | 🔒 **Private messages** | End-to-end encrypted 1-to-1 chat with delivery ticks ✓✓ | Whole mesh |
 | 🆘 **SOS alerts** | One button alerts every phone with vibration and a notification; sent before any other traffic | Whole mesh |
+| 📍 **SOS live location** | After an SOS, your GPS position is shared every 30 s for 15 min; others tap **Open location** to see it in their maps app. Works without internet | Whole mesh |
+| 🎙️ **SOS voice message** | A 10-second voice clip is recorded automatically after an SOS and sent with urgent priority | Whole mesh |
 | 📷 **Photos** | Camera or gallery, compressed on the phone, shown with progress, full-screen zoom; private photos are encrypted | Whole mesh |
 | 🎤 **Voice messages** | Up to 10 seconds, sent automatically at the limit | Whole mesh |
 | 📞 **Voice calls** | Live calls with mute, speaker/earpiece and echo cancellation | Direct range only (1 hop) |
@@ -209,9 +211,27 @@ in the app. During the call you can mute, switch between speaker and earpiece, o
 Unanswered calls stop after 30 s, and calls end automatically if the direct link drops for 8 s.
 
 ### SOS
-Tap the red **SOS** button, describe where you are, and confirm. Every phone in the mesh gets a
-red banner, vibration and a notification, even in the background. SOS messages are forwarded
-before all other traffic. bitchat users receive it as a public `🆘 SOS: …` message.
+Tap the red **SOS** button, describe what's wrong, and confirm. Then:
+
+1. **The text alert goes out instantly** to every phone in the mesh: red banner, vibration and a
+   notification, even in the background. It's forwarded before all other traffic. If your phone
+   already knows a recent position, it's included.
+2. **Location and microphone permissions** are asked (first time only).
+3. **Live location starts:** your GPS position is sent right away, then every 30 seconds for
+   15 minutes. A bar at the top shows *"Sharing your live location… Stop"*.
+   GPS works with no internet or SIM; indoors the first fix can take a minute.
+4. **A 10-second voice message records automatically** with a countdown. Tap **Send now** to send
+   early or **Skip** to send nothing. It goes to everyone with urgent priority.
+
+People who receive the SOS see **📍 Open location · ±12 m · updated 1 min ago** on the SOS card
+and banner. Tapping it opens the position in their maps app (Google Maps, OsmAnd, Organic Maps…;
+offline maps work too). The SOS voice message appears as a red voice bubble.
+
+bitchat users receive the SOS as a public `🆘 SOS: …` message, followed by one
+`🆘 SOS location: https://maps.google.com/?q=…` link.
+
+> Everyone in the mesh should run the same MeshTalk version: older versions don't relay the new
+> live-location packets.
 
 ### Menu (⋮)
 - **Turn mesh on/off**
@@ -226,9 +246,9 @@ before all other traffic. bitchat users receive it as a public `🆘 SOS: …` m
 |---|---|---|
 | Nearby devices (Bluetooth scan / advertise / connect) | First launch (Android 12+) | Find and connect to nearby phones: the core of the app |
 | Nearby Wi-Fi devices | First launch (Android 13+) | Faster phone-to-phone links over Wi-Fi |
-| Location | First launch (Android 12 and older) | Android requires it for Bluetooth scanning on these versions. **Your location is never read or stored** |
+| Location | First launch (Android 12 and older), and when you send an SOS | Bluetooth scanning on older Android versions, and **your SOS live location**. Your position is only read while an SOS is sharing it, and only sent to the mesh |
 | Notifications | First launch (Android 13+) | SOS alerts, messages and incoming calls while the app is in the background |
-| Microphone | First voice message or call | Recording voice messages and calls |
+| Microphone | First voice message, call or SOS | Recording voice messages, calls and the SOS voice clip |
 | Camera / photos | When you send a photo | Taking or choosing a photo (handled by Android's own picker) |
 | Foreground service | Automatic | Keeps the mesh relaying with the screen off |
 
@@ -322,11 +342,12 @@ lib/
 │   ├── bc_protocol.dart          bitchat binary format: codec, padding, compression, fragments, TLVs
 │   └── bc_mesh.dart              bitchat mesh: announcements, verification, relaying, bridging
 ├── platform/
-│   ├── native_bridge.dart        Channel to Kotlin: service, notifications, audio, calls
+│   ├── native_bridge.dart        Channel to Kotlin: service, notifications, audio, calls, location
 │   ├── ble_bridge.dart           Channel to Kotlin: bitchat Bluetooth LE links
 │   └── permissions.dart          Per-Android-version permission requests
 └── ui/
     ├── home_screen.dart          Status bar, SOS, Everyone and People tabs, menu
+    ├── sos_sheet.dart            10-second SOS voice recorder with countdown
     ├── dm_screen.dart            Private chat and call button
     ├── call_screen.dart          Ringing and active-call screen
     ├── onboarding_screen.dart    Nickname setup
@@ -335,7 +356,8 @@ lib/
 
 android/app/src/main/kotlin/com/meshtalk/android/meshtalk/
 ├── MainActivity.kt               Method/event channels to Flutter
-├── MeshForegroundService.kt      Keeps the app alive in the background (connectedDevice + microphone)
+├── MeshForegroundService.kt      Keeps the app alive in the background (connectedDevice + microphone + location)
+├── MeshLocation.kt               GPS/network position for SOS (no internet needed), opens maps app
 ├── MeshNotifications.kt          Notification channels: service, messages, SOS
 ├── VoiceNotes.kt                 Voice message recording (AAC) and playback
 ├── CallAudio.kt                  Live call capture/playback, echo cancellation, jitter buffer
@@ -376,14 +398,15 @@ unknown type is dropped without being relayed.
 
 | Type | Body | Delivered to | Priority |
 |---|---|---|---|
-| `sos` | `x` text (≤ 1000 chars) | everyone | 0 (first) |
+| `sos` | `x` text (≤ 1000 chars); optional `lat`, `lon`, `acc` (m), `lts` (fix time) | everyone | 0 (first) |
+| `loc` | `sid` SOS ID, `lat`, `lon`, `acc` (m), `lts` (fix time); every 30 s for 15 min | everyone | 1 |
 | `dm` | `pk` sender key, `n` nonce, `c` ciphertext, `m` tag | destination | 1 |
 | `ack` | `r` ID of the message being confirmed | destination | 1 |
 | `call` | `a` offer/accept/decline/busy/end, `c` call ID; always ttl 1 | direct neighbour | 1 |
 | `chat` | `x` text (≤ 1000 chars) | everyone | 2 |
 | `bc` | `p` a bitchat packet (base64), for bridging | everyone | 2 |
 | `ann` | `pk` sender's X25519 public key | everyone | 3 |
-| `blob` | `mid` media ID, `k` img/voice, `i` index, `cnt` count, `dur` length; `d` base64 chunk or `e` encrypted chunk | everyone, or destination if private | 4 (last) |
+| `blob` | `mid` media ID, `k` img/voice, `i` index, `cnt` count, `dur` length; `d` base64 chunk or `e` encrypted chunk. SOS voice adds `u`:1, `sos`:1, `sid` | everyone, or destination if private | 4 (last); 1 for SOS voice |
 
 ### 11.2 Forwarding rules
 
@@ -397,8 +420,12 @@ unknown type is dropped without being relayed.
 8. If the destination is this phone, stop.
 9. If `ttl > 1`, send a copy with `ttl − 1`, `h + 1` to every link except the one it came from.
 
-**Catch-up:** the last 200 text packets (`chat`, `sos`, `dm`, `ack`, `bc`) from the past 30 minutes
-are replayed to every new neighbour. Photo/voice chunks, call signals and announcements are not replayed.
+**Catch-up:** the last 200 text packets (`chat`, `sos`, `loc`, `dm`, `ack`, `bc`) from the past 30 minutes
+are replayed to every new neighbour, plus SOS voice clips. Other photo/voice chunks, call signals and
+announcements are not replayed.
+
+**Location updates:** a receiver keeps only the newest position per SOS (by `lts`), ignores `loc`
+packets whose sender isn't the SOS sender, and holds updates that arrive before their SOS.
 
 **Priorities:** each link has its own send queue, sorted by priority, so SOS and private messages
 never wait behind a photo.
@@ -477,7 +504,8 @@ flags: 0x01 recipient · 0x02 signature · 0x04 compressed (raw DEFLATE) · 0x08
 - Stored on your phone only: your keys, nickname, message history (last 500 messages) and media files.
   *Clear message history* deletes messages and media; uninstalling deletes everything.
 - Visible to nearby phones: your nickname, your public keys, and your public messages.
-- Location: never read. Older Android versions require the location *permission* for Bluetooth scanning only.
+- Location: read **only while an SOS is sharing it** (15 minutes, or until you tap Stop), and sent
+  only to the mesh, never to a server. Older Android versions also need the location permission for Bluetooth scanning.
 
 Found a security problem? Please open a private
 [security advisory](https://github.com/AbdullahJatoi007/MeshTalk/security/advisories/new) instead of a public issue.
@@ -557,6 +585,9 @@ translated from bitchat's Swift code: 3,000 random packets plus Ed25519 signatur
 - [ ] Private message shows ✓✓ after delivery
 - [ ] Three phones in a line (ends out of range): message shows "2 hops"
 - [ ] SOS alerts every phone, including one with the app in the background
+- [ ] After an SOS, receivers see **Open location** within ~1 min outdoors and it opens the maps app
+- [ ] SOS voice clip records for 10 s and plays on a phone 2 hops away
+- [ ] Live location keeps updating with the sender's screen off, and stops after Stop
 - [ ] A phone arriving 5 minutes later receives earlier messages
 - [ ] Photo reaches a phone 2 hops away intact
 - [ ] Voice message sends itself at 10 s and plays on the receiver
@@ -621,7 +652,12 @@ Live audio relayed through several phones would be delayed and choppy. Voice mes
 More than a normal messenger, because Bluetooth and Wi-Fi stay active. Turn the mesh off from ⋮ when you don't need it.
 
 **Is my location tracked?**
-No. The location permission on older Android versions is an Android requirement for Bluetooth scanning; MeshTalk never reads your location.
+No. MeshTalk reads your location only after **you** send an SOS, for 15 minutes or until you tap Stop,
+and sends it only to phones in the mesh. Older Android versions also require the location permission for Bluetooth scanning.
+
+**Does "Open location" need internet?**
+No for the position itself (it comes from GPS over the mesh). The map background needs either
+internet or offline maps; download your area in Google Maps or use an offline maps app like OsmAnd or Organic Maps.
 
 ---
 

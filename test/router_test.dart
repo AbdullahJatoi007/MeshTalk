@@ -27,6 +27,7 @@ class FakeNet {
 
 class FakeTransport implements MeshTransport {
   FakeTransport(this.id, this.net);
+
   final String id;
   final FakeNet net;
   final Map<String, String> _links = {}; // linkId → peer node
@@ -49,10 +50,13 @@ class FakeTransport implements MeshTransport {
 
   @override
   Set<String> get links => _links.keys.toSet();
+
   @override
   String? nodeOf(String linkId) => _links[linkId];
+
   @override
   Future<void> start() async {}
+
   @override
   Future<void> stop() async {}
 
@@ -120,7 +124,8 @@ void main() {
     expect(Packet.decode(Uint8List(kMaxPacketBytes + 1)), isNull);
   });
 
-  test('message crosses a 5-phone line (multi-hop) with correct hop count', () async {
+  test('message crosses a 5-phone line (multi-hop) with correct hop count',
+      () async {
     final m = Mesh();
     final ids = List.generate(5, (i) => nid(i + 1));
     for (final id in ids) {
@@ -141,7 +146,8 @@ void main() {
     }
   });
 
-  test('dedup: a ring delivers once per node and the flood terminates', () async {
+  test('dedup: a ring delivers once per node and the flood terminates',
+      () async {
     final m = Mesh();
     final ids = List.generate(6, (i) => nid(i + 1));
     for (final id in ids) {
@@ -186,7 +192,8 @@ void main() {
     expect(m.of(ids[5], PacketType.chat), isEmpty);
   });
 
-  test('dm is relayed but only delivered to its destination, and stops there', () async {
+  test('dm is relayed but only delivered to its destination, and stops there',
+      () async {
     final m = Mesh();
     final a = nid(1), b = nid(2), c = nid(3), d = nid(4);
     for (final id in [a, b, c, d]) {
@@ -236,7 +243,8 @@ void main() {
     }
     m.net.connect(a, b);
     await settle();
-    m.routers[a]!.send(pkt(a, PacketType.chat, body: {'x': 'before C arrived'}));
+    m.routers[a]!
+        .send(pkt(a, PacketType.chat, body: {'x': 'before C arrived'}));
     m.routers[a]!.send(pkt(a, PacketType.ann, body: {'pk': 'k'}));
     await settle();
     expect(m.of(c, PacketType.chat), isEmpty);
@@ -247,7 +255,8 @@ void main() {
     expect(got.length, 1);
     expect(got.single.body['x'], 'before C arrived');
     expect(got.single.hops + 1, 2);
-    expect(m.of(c, PacketType.ann), isEmpty, reason: 'announcements are not replayed');
+    expect(m.of(c, PacketType.ann), isEmpty,
+        reason: 'announcements are not replayed');
   });
 
   test('SOS jumps the queue ahead of chat', () async {
@@ -324,13 +333,65 @@ void main() {
     final ra = m.routers[a]!;
     final link = ra.linkFor(b)!;
     expect(ra.linkFor(c), isNull, reason: 'C is 2 hops away');
-    final frame = Uint8List.fromList([kRawFrameMarker, 1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 9, 9]);
+    final frame = Uint8List.fromList(
+        [kRawFrameMarker, 1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 9, 9]);
     await ra.sendRaw(link, frame);
     await settle();
     expect(rawB.length, 1);
     expect(rawB.single, frame);
     expect(rawC, isEmpty);
     expect(m.got[b], isEmpty, reason: 'raw frames are not packets');
+  });
+
+  test('SOS voice clips are replayed to late joiners, other media is not',
+      () async {
+    final m = Mesh();
+    final a = nid(1), b = nid(2), c = nid(3);
+    for (final id in [a, b, c]) {
+      m.add(id);
+    }
+    m.net.connect(a, b);
+    await settle();
+    m.routers[a]!.send(pkt(a, PacketType.blob, body: {
+      'mid': nid(98),
+      'k': 'voice',
+      'i': 0,
+      'cnt': 1,
+      'd': 'AAAA',
+      'u': 1,
+      'sos': 1,
+      'sid': nid(50),
+    }));
+    m.routers[a]!.send(pkt(a, PacketType.blob,
+        body: {'mid': nid(97), 'k': 'voice', 'i': 0, 'cnt': 1, 'd': 'AAAA'}));
+    await settle();
+    expect(m.of(b, PacketType.blob).length, 2);
+    m.net.connect(b, c);
+    await settle();
+    expect(
+        m.of(c, PacketType.blob).map((p) => p.body['mid']).toList(), [nid(98)]);
+  });
+
+  test('SOS live-location packets are relayed and replayed', () async {
+    final m = Mesh();
+    final a = nid(1), b = nid(2), c = nid(3);
+    for (final id in [a, b, c]) {
+      m.add(id);
+    }
+    m.net.connect(a, b);
+    await settle();
+    m.routers[a]!.send(pkt(a, PacketType.loc, body: {
+      'sid': nid(50),
+      'lat': 24.86,
+      'lon': 67.0,
+      'acc': 12,
+      'lts': 1
+    }));
+    await settle();
+    expect(m.of(b, PacketType.loc).length, 1);
+    m.net.connect(b, c);
+    await settle();
+    expect(m.of(c, PacketType.loc).length, 1, reason: 'late joiner gets it');
   });
 
   test('photo chunks and call signals are not replayed to late joiners',
@@ -364,8 +425,10 @@ void main() {
     m.net.connect(a, b);
     m.net.connect(b, c);
     await settle();
-    m.routers[a]!.send(pkt(a, PacketType.call, dst: b, ttl: 1, body: {'a': 'offer', 'c': nid(7)}));
-    m.routers[a]!.send(pkt(a, PacketType.call, dst: c, ttl: 1, body: {'a': 'offer', 'c': nid(8)}));
+    m.routers[a]!.send(pkt(a, PacketType.call,
+        dst: b, ttl: 1, body: {'a': 'offer', 'c': nid(7)}));
+    m.routers[a]!.send(pkt(a, PacketType.call,
+        dst: c, ttl: 1, body: {'a': 'offer', 'c': nid(8)}));
     await settle();
     expect(m.of(b, PacketType.call).length, 1);
     expect(m.of(c, PacketType.call), isEmpty);
@@ -382,8 +445,13 @@ void main() {
       IncomingMedia? im;
       for (final i in [2, 0, 2, 1]) {
         im = asm.add(
-            mediaId: nid(5), kind: MediaKind.image, index: i, total: 3,
-            bytes: chunks[i], src: nid(1), now: 0);
+            mediaId: nid(5),
+            kind: MediaKind.image,
+            index: i,
+            total: 3,
+            bytes: chunks[i],
+            src: nid(1),
+            now: 0);
       }
       expect(im!.complete, isTrue);
       expect(im.assemble(), data);
@@ -392,13 +460,56 @@ void main() {
     test('rejects bad chunks and expires incomplete media', () {
       final asm = MediaAssembler();
       final one = Uint8List.fromList([1, 2, 3]);
-      expect(asm.add(mediaId: nid(5), kind: 'exe', index: 0, total: 2, bytes: one, src: nid(1), now: 0), isNull);
-      expect(asm.add(mediaId: nid(5), kind: MediaKind.voice, index: 2, total: 2, bytes: one, src: nid(1), now: 0), isNull);
-      expect(asm.add(mediaId: nid(5), kind: MediaKind.voice, index: 0, total: kMaxChunks + 1, bytes: one, src: nid(1), now: 0), isNull);
-      final first = asm.add(mediaId: nid(5), kind: MediaKind.voice, index: 0, total: 2, bytes: one, src: nid(1), now: 0);
+      expect(
+          asm.add(
+              mediaId: nid(5),
+              kind: 'exe',
+              index: 0,
+              total: 2,
+              bytes: one,
+              src: nid(1),
+              now: 0),
+          isNull);
+      expect(
+          asm.add(
+              mediaId: nid(5),
+              kind: MediaKind.voice,
+              index: 2,
+              total: 2,
+              bytes: one,
+              src: nid(1),
+              now: 0),
+          isNull);
+      expect(
+          asm.add(
+              mediaId: nid(5),
+              kind: MediaKind.voice,
+              index: 0,
+              total: kMaxChunks + 1,
+              bytes: one,
+              src: nid(1),
+              now: 0),
+          isNull);
+      final first = asm.add(
+          mediaId: nid(5),
+          kind: MediaKind.voice,
+          index: 0,
+          total: 2,
+          bytes: one,
+          src: nid(1),
+          now: 0);
       expect(first!.progress, 0.5);
       // same id from a different sender: ignored
-      expect(asm.add(mediaId: nid(5), kind: MediaKind.voice, index: 1, total: 2, bytes: one, src: nid(2), now: 0), isNull);
+      expect(
+          asm.add(
+              mediaId: nid(5),
+              kind: MediaKind.voice,
+              index: 1,
+              total: 2,
+              bytes: one,
+              src: nid(2),
+              now: 0),
+          isNull);
       asm.prune(kAssemblyTimeoutMs + 1);
       expect(asm.pendingCount, 0);
     });

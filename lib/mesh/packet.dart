@@ -31,7 +31,11 @@ class PacketType {
   /// MeshTalk phones far from any bitchat user still bridge both networks.
   static const bc = 'bc';
 
-  static const all = {ann, chat, sos, dm, ack, blob, call, bc};
+  /// Live location update for an SOS: `sid` (the SOS message id), `lat`,
+  /// `lon`, `acc` (metres).
+  static const loc = 'loc';
+
+  static const all = {ann, chat, sos, dm, ack, blob, call, bc, loc};
 }
 
 /// Largest encoded packet we accept or relay. Keeps the flood cheap.
@@ -86,14 +90,17 @@ class Packet {
       case PacketType.dm:
       case PacketType.ack:
       case PacketType.call:
+      case PacketType.loc:
         return 1;
       case PacketType.chat:
       case PacketType.bc:
         return 2;
       case PacketType.ann:
         return 3;
-      default: // blob: big and least urgent, never delays text or SOS
-        return 4;
+      default:
+        // blob: big and least urgent, never delays text or SOS; an SOS voice
+        // message is marked urgent (`u`: 1) and goes right after SOS text.
+        return body['u'] == 1 ? 1 : 4;
     }
   }
 

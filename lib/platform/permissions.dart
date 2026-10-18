@@ -59,3 +59,25 @@ Future<PermissionResult> requestMeshPermissions() async {
 /// Microphone, for voice messages and calls. Asked the first time it's needed.
 Future<bool> requestMicrophone() async =>
     (await Permission.microphone.request()).isGranted;
+
+/// What the SOS flow got: location for the live position, microphone for
+/// the 10-second voice clip. Asked together in one request (Android shows
+/// one dialog after another), because a second request while one is still
+/// open fails.
+class SosPermissions {
+  final bool location;
+  final bool microphone;
+  const SosPermissions(this.location, this.microphone);
+}
+
+Future<SosPermissions> requestSosPermissions() async {
+  try {
+    final s = await [Permission.location, Permission.microphone].request();
+    return SosPermissions(
+      s[Permission.location]?.isGranted ?? false,
+      s[Permission.microphone]?.isGranted ?? false,
+    );
+  } catch (_) {
+    return const SosPermissions(false, false);
+  }
+}

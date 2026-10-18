@@ -47,6 +47,10 @@ class ChatMessage {
   /// 'bitchat' when the message came over the bitchat Bluetooth network.
   final String? via;
 
+  /// SOS location (latest known), with accuracy in metres and fix time.
+  double? lat, lon, acc;
+  int? locTs;
+
   ChatMessage({
     required this.id,
     required this.kind,
@@ -63,9 +67,16 @@ class ChatMessage {
     this.progress = 1,
     this.durMs = 0,
     this.via,
+    this.lat,
+    this.lon,
+    this.acc,
+    this.locTs,
   });
 
+  bool get hasLocation => lat != null && lon != null;
+
   bool get isMedia => media != null;
+
   bool get viaBitchat => via == 'bitchat';
 
   /// Short text for notifications and conversation lists.
@@ -91,6 +102,7 @@ class ChatMessage {
         if (media != null) 'pr': progress,
         if (durMs > 0) 'du': durMs,
         if (via != null) 'v': via,
+        if (hasLocation) ...{'la': lat, 'lo': lon, 'ac': acc, 'lt': locTs},
       };
 
   static ChatMessage? fromJson(Map<String, dynamic> j) {
@@ -111,6 +123,10 @@ class ChatMessage {
         progress: ((j['pr'] as num?) ?? 1).toDouble(),
         durMs: (j['du'] as int?) ?? 0,
         via: j['v'] as String?,
+        lat: (j['la'] as num?)?.toDouble(),
+        lon: (j['lo'] as num?)?.toDouble(),
+        acc: (j['ac'] as num?)?.toDouble(),
+        locTs: (j['lt'] as num?)?.toInt(),
       );
     } catch (_) {
       return null;
@@ -154,6 +170,10 @@ class MeshService extends ChangeNotifier with WidgetsBindingObserver {
   static const _callSilenceMs = 8000;
   static const _bitchatKey = 'bitchat_enabled_v1';
 
+  /// SOS live location: one update every 30 s for 15 minutes.
+  static const liveLocationPeriod = Duration(seconds: 30);
+  static const liveLocationFor = Duration(minutes: 15);
+
   /// Largest bitchat packet we carry across Nearby (text-sized traffic).
   static const _maxBridgeBytes = 8000;
 
@@ -184,6 +204,16 @@ class MeshService extends ChangeNotifier with WidgetsBindingObserver {
 
   /// Why bitchat can't run right now (Bluetooth off, permission…), or null.
   String? bitchatProblem;
+
+  // ── SOS live location ──
+  /// Id of our SOS whose location we're sharing right now (null = not sharing).
+  String? liveSosId;
+  DateTime? liveUntil;
+  Timer? _liveTimer;
+  bool _locBusy = false, _locMirrored = false;
+
+  /// Location updates that arrived before their SOS: sid → packet.
+  final Map<String, Packet> _pendingLoc = {};
 
   CallSession? call;
   String? _callEndedReason;
@@ -248,6 +278,7 @@ class MeshService extends ChangeNotifier with WidgetsBindingObserver {
   Future<void> stop() async {
     if (!running) return;
     if (call != null) endCall('Mesh turned off');
+    stopLiveLocation();
     running = false;
     await _stopBitchat();
     _announceTimer?.cancel();
@@ -275,6 +306,7 @@ class MeshService extends ChangeNotifier with WidgetsBindingObserver {
     _pruneTimer?.cancel();
     _ringTimer?.cancel();
     _callWatchdog?.cancel();
+    _liveTimer?.cancel();
     _transport?.stop();
     super.dispose();
   }
@@ -363,17 +395,25 @@ class MeshService extends ChangeNotifier with WidgetsBindingObserver {
     _bitchat?.sendPublic(_clip(text)); // also reaches bitchat users
   }
 
-  void sendSos(String text) {
-    _sendBroadcast(PacketType.sos, text);
-    // bitchat has no SOS type: it arrives there as a public message.
+  /// Sends the SOS text at once (with the last known position, if there is
+  /// a recent one). Returns the SOS id, used for its live location and
+  /// voice clip, or null if nothing was sent.
+  Future<String?> sendSos(String text) async {
     final t = _clip(text);
-    if (t.isNotEmpty) _bitchat?.sendPublic('🆘 SOS: $t');
+    if (t.isEmpty || _router == null) return null;
+    final last = await NativeBridge.locLast(); // null without permission
+    final fresh = last != null &&
+        DateTime.now().millisecondsSinceEpoch - last.ts < 10 * 60 * 1000;
+    final id = _sendBroadcast(PacketType.sos, t, fix: fresh ? last : null);
+    // bitchat has no SOS type: it arrives there as a public message.
+    _bitchat?.sendPublic('🆘 SOS: $t');
+    return id;
   }
 
-  void _sendBroadcast(String type, String text) {
+  String? _sendBroadcast(String type, String text, {GeoFix? fix}) {
     final t = _clip(text);
-    if (t.isEmpty || _router == null) return;
-    final p = _packet(type, body: {'x': t});
+    if (t.isEmpty || _router == null) return null;
+    final p = _packet(type, body: {'x': t, if (fix != null) ..._locBody(fix)});
     _router!.send(p);
     _add(ChatMessage(
       id: p.id,
@@ -383,7 +423,144 @@ class MeshService extends ChangeNotifier with WidgetsBindingObserver {
       text: t,
       ts: p.ts,
       mine: true,
+      lat: fix?.lat,
+      lon: fix?.lon,
+      acc: fix?.acc,
+      locTs: fix?.ts,
     ));
+    return p.id;
+  }
+
+  // ── SOS: live location + voice clip ───────────────────────────────────
+
+  static Map<String, dynamic> _locBody(GeoFix f) => {
+        'lat': double.parse(f.lat.toStringAsFixed(6)),
+        'lon': double.parse(f.lon.toStringAsFixed(6)),
+        'acc': f.acc.round(),
+        'lts': f.ts,
+      };
+
+  /// Shares our position for SOS [sosId]: now, then every 30 s for 15 min
+  /// (or until [stopLiveLocation]). Needs the location permission.
+  void startLiveLocation(String sosId) {
+    stopLiveLocation();
+    liveSosId = sosId;
+    liveUntil = DateTime.now().add(liveLocationFor);
+    _locMirrored = false;
+    NativeBridge.serviceLocation(true);
+    _shareLocation();
+    _liveTimer = Timer.periodic(liveLocationPeriod, (_) {
+      if (liveUntil == null || DateTime.now().isAfter(liveUntil!)) {
+        stopLiveLocation();
+      } else {
+        _shareLocation();
+      }
+    });
+    notifyListeners();
+  }
+
+  void stopLiveLocation() {
+    if (liveSosId == null) return;
+    _liveTimer?.cancel();
+    _liveTimer = null;
+    liveSosId = null;
+    liveUntil = null;
+    NativeBridge.serviceLocation(false);
+    notifyListeners();
+  }
+
+  Future<void> _shareLocation() async {
+    final sid = liveSosId;
+    if (sid == null || _locBusy) return;
+    _locBusy = true;
+    try {
+      final fix = await NativeBridge.locCurrent(timeoutMs: 20000);
+      if (fix == null || liveSosId != sid || _router == null) return;
+      final mine = _byId[sid];
+      if (mine != null) {
+        mine
+          ..lat = fix.lat
+          ..lon = fix.lon
+          ..acc = fix.acc
+          ..locTs = fix.ts;
+        _scheduleSave();
+      }
+      _router!
+          .send(_packet(PacketType.loc, body: {'sid': sid, ..._locBody(fix)}));
+      if (!_locMirrored) {
+        // bitchat users get one map link (it has no location type).
+        _locMirrored = true;
+        _bitchat?.sendPublic('🆘 SOS location: https://maps.google.com/?q='
+            '${fix.lat.toStringAsFixed(5)},${fix.lon.toStringAsFixed(5)}');
+      }
+      notifyListeners();
+    } finally {
+      _locBusy = false;
+    }
+  }
+
+  /// The 10-second voice clip recorded right after an SOS. Sent to everyone,
+  /// with urgent priority, and kept for phones that join a bit later.
+  Future<void> sendSosVoice(
+      String sosId, String recordingPath, int durMs) async {
+    final bytes = await File(recordingPath).readAsBytes();
+    if (bytes.length > kMaxMediaBytes) {
+      throw StateError('Voice message is too large');
+    }
+    final id = Packet.newId();
+    final path = MediaStore.pathFor(id, MediaKind.voice);
+    await File(recordingPath).rename(path);
+    await _sendMedia(id, MediaKind.voice, bytes, path,
+        durMs: durMs.clamp(0, kMaxVoiceMs).toInt(), sosId: sosId);
+  }
+
+  /// A 'loc' packet: newer position for someone's SOS.
+  void _onLocation(Packet p) {
+    final b = p.body;
+    final sid = b['sid'], lat = b['lat'], lon = b['lon'];
+    if (sid is! String || !Packet.isNodeId(sid)) return;
+    if (lat is! num || lon is! num) return;
+    if (lat.abs() > 90 || lon.abs() > 180) return;
+    final m = _byId[sid];
+    if (m == null) {
+      // The SOS itself hasn't arrived yet: keep the newest update for it.
+      if (_pendingLoc.length > 50) _pendingLoc.remove(_pendingLoc.keys.first);
+      final old = _pendingLoc[sid];
+      if (old == null || _lts(p) > _lts(old)) _pendingLoc[sid] = p;
+      return;
+    }
+    _applyLocation(m, p);
+  }
+
+  static int _lts(Packet p) {
+    final t = p.body['lts'];
+    return t is int ? t : p.ts;
+  }
+
+  /// Copies a position from packet [p] (an SOS or 'loc') onto SOS [m].
+  bool _applyLocation(ChatMessage m, Packet p) {
+    final b = p.body;
+    final lat = b['lat'], lon = b['lon'], acc = b['acc'];
+    if (m.kind != MessageKind.sos || m.fromId != p.src) return false;
+    if (lat is! num || lon is! num || lat.abs() > 90 || lon.abs() > 180) {
+      return false;
+    }
+    final ts = _lts(p);
+    if (m.locTs != null && ts <= m.locTs!) return false; // older update
+    final first = !m.hasLocation;
+    m
+      ..lat = lat.toDouble()
+      ..lon = lon.toDouble()
+      ..acc = acc is num ? acc.toDouble().clamp(0, 100000).toDouble() : null
+      ..locTs = ts;
+    _scheduleSave();
+    if (first && !m.mine && !_foreground) {
+      NativeBridge.notify('📍 ${m.fromName} shared their location',
+          'Open MeshTalk and tap "Open location"',
+          urgent: true);
+    }
+    notifyListeners();
+    return true;
   }
 
   PeerInfo _reachable(String peerId) {
@@ -447,7 +624,7 @@ class MeshService extends ChangeNotifier with WidgetsBindingObserver {
 
   Future<void> _sendMedia(
       String mediaId, String kind, Uint8List data, String path,
-      {String? toPeer, int durMs = 0}) async {
+      {String? toPeer, int durMs = 0, String? sosId}) async {
     final r = _router;
     if (r == null) throw StateError('Mesh is off');
     final peer = toPeer == null ? null : _reachable(toPeer);
@@ -455,7 +632,11 @@ class MeshService extends ChangeNotifier with WidgetsBindingObserver {
 
     _add(ChatMessage(
       id: mediaId,
-      kind: toPeer == null ? MessageKind.public : MessageKind.dm,
+      kind: sosId != null
+          ? MessageKind.sos
+          : toPeer == null
+              ? MessageKind.public
+              : MessageKind.dm,
       peerId: toPeer,
       fromId: selfId,
       fromName: nick ?? '?',
@@ -475,6 +656,8 @@ class MeshService extends ChangeNotifier with WidgetsBindingObserver {
         'i': i,
         'cnt': chunks.length,
         if (durMs > 0) 'dur': durMs,
+        // SOS voice: urgent queue, kept for late joiners, shown as SOS.
+        if (sosId != null) ...{'u': 1, 'sos': 1, 'sid': sosId},
       };
       if (peer != null) {
         body['e'] = await identity.encryptBytes(
@@ -528,6 +711,9 @@ class MeshService extends ChangeNotifier with WidgetsBindingObserver {
           hops: p.hops + 1,
         );
         _add(m);
+        _applyLocation(m, p);
+        final later = _pendingLoc.remove(p.id);
+        if (later != null) _applyLocation(m, later);
         sosAlert = m;
         HapticFeedback.heavyImpact();
         NativeBridge.notify('🆘 SOS from ${p.srcName}',
@@ -577,6 +763,10 @@ class MeshService extends ChangeNotifier with WidgetsBindingObserver {
         _onCallSignal(p);
         break;
 
+      case PacketType.loc:
+        _onLocation(p);
+        break;
+
       case PacketType.bc:
         final raw = p.body['p'];
         if (raw is! String || _bitchat == null) return;
@@ -606,6 +796,7 @@ class MeshService extends ChangeNotifier with WidgetsBindingObserver {
     if (i is! int || cnt is! int) return;
     if (p.dst != null && p.dst != selfId) return;
     final isPrivate = p.dst == selfId;
+    final isSos = !isPrivate && b['sos'] == 1;
 
     // Already have the whole thing (a late duplicate chunk).
     final existing = _byId[mid];
@@ -618,8 +809,7 @@ class MeshService extends ChangeNotifier with WidgetsBindingObserver {
     if (isPrivate) {
       final e = b['e'];
       if (e is! Map<String, dynamic>) return;
-      bytes =
-          await identity.decryptBytes(e, p.src, _aad(p.src, selfId, p.id));
+      bytes = await identity.decryptBytes(e, p.src, _aad(p.src, selfId, p.id));
     } else {
       final d = b['d'];
       if (d is! String) return;
@@ -648,7 +838,11 @@ class MeshService extends ChangeNotifier with WidgetsBindingObserver {
       final dur = b['dur'];
       m = ChatMessage(
         id: mid,
-        kind: isPrivate ? MessageKind.dm : MessageKind.public,
+        kind: isPrivate
+            ? MessageKind.dm
+            : isSos
+                ? MessageKind.sos
+                : MessageKind.public,
         peerId: isPrivate ? p.src : null,
         fromId: p.src,
         fromName: p.srcName,
@@ -673,6 +867,12 @@ class MeshService extends ChangeNotifier with WidgetsBindingObserver {
       if (isPrivate) {
         _sendAck(p.src, mid);
         _onNewPrivate(p.src, p.srcName, m.preview);
+      }
+      if (isSos) {
+        HapticFeedback.heavyImpact();
+        NativeBridge.notify('🆘 SOS voice from ${p.srcName}',
+            'Tap to listen to their 10-second message',
+            urgent: true);
       }
     }
     notifyListeners();
@@ -789,7 +989,8 @@ class MeshService extends ChangeNotifier with WidgetsBindingObserver {
         _startRingTimer('Missed call from ${p.srcName}');
         HapticFeedback.heavyImpact();
         if (!_foreground) {
-          NativeBridge.notify('📞 Incoming call', '${p.srcName} is calling you');
+          NativeBridge.notify(
+              '📞 Incoming call', '${p.srcName} is calling you');
         }
         notifyListeners();
         break;
@@ -909,7 +1110,9 @@ class MeshService extends ChangeNotifier with WidgetsBindingObserver {
     final list = (_bitchat?.peers.values ?? const <BcPeer>[])
         .where((p) => p.id != selfId && !mine.contains(p.id))
         .toList()
-      ..sort((a, b) => a.hops != b.hops ? a.hops - b.hops : a.nickname.compareTo(b.nickname));
+      ..sort((a, b) => a.hops != b.hops
+          ? a.hops - b.hops
+          : a.nickname.compareTo(b.nickname));
     return list;
   }
 
@@ -992,13 +1195,17 @@ class MeshService extends ChangeNotifier with WidgetsBindingObserver {
   void _onBitchatMessage(BcPublicMessage m) {
     if (m.senderId == selfId) return;
     if (m.fromMeshTalk) {
-      if (_hasNearbyCopy(m.senderId, m.text, m.timestamp)) return;
+      if (_isSosMirror(m) || _hasNearbyCopy(m.senderId, m.text, m.timestamp)) {
+        return;
+      }
       if (_heldBitchat.containsKey(m.key)) return;
       _heldMessages[m.key] = m;
       _heldBitchat[m.key] = Timer(const Duration(seconds: 4), () {
         _heldBitchat.remove(m.key);
         final held = _heldMessages.remove(m.key);
-        if (held != null && !_hasNearbyCopy(held.senderId, held.text, held.timestamp)) {
+        if (held != null &&
+            !_isSosMirror(held) &&
+            !_hasNearbyCopy(held.senderId, held.text, held.timestamp)) {
           _showBitchat(held);
         }
       });
@@ -1024,12 +1231,22 @@ class MeshService extends ChangeNotifier with WidgetsBindingObserver {
 
   /// A MeshTalk sender's long message reaches bitchat as several parts, so
   /// "same message" means the Nearby text contains the bitchat text.
-  bool _hasNearbyCopy(String sender, String text, int ts) => _messages.any((x) =>
-      x.kind == MessageKind.public &&
-      !x.viaBitchat &&
-      x.fromId == sender &&
-      x.text.contains(text) &&
-      (x.ts - ts).abs() < 10 * 60 * 1000);
+  bool _hasNearbyCopy(String sender, String text, int ts) =>
+      _messages.any((x) =>
+          x.kind != MessageKind.dm &&
+          !x.viaBitchat &&
+          x.fromId == sender &&
+          x.text.contains(text) &&
+          (x.ts - ts).abs() < 10 * 60 * 1000);
+
+  /// "🆘 SOS…" lines a MeshTalk phone mirrors to bitchat, when we already
+  /// have that person's real SOS over Nearby.
+  bool _isSosMirror(BcPublicMessage m) =>
+      m.text.startsWith('🆘 SOS') &&
+      _messages.any((x) =>
+          x.kind == MessageKind.sos &&
+          x.fromId == m.senderId &&
+          (x.ts - m.timestamp).abs() < 30 * 60 * 1000);
 
   /// A Nearby chat arrived: forget bitchat copies of it that are waiting.
   void _dropBitchatCopies(String sender, String text) {

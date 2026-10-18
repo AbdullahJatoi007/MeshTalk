@@ -15,6 +15,7 @@ class MainActivity : FlutterActivity() {
     private var voice: VoiceNotes? = null
     private var bleSink: EventChannel.EventSink? = null
     private var ble: BitchatBle? = null
+    private val location by lazy { MeshLocation(this) }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -84,6 +85,36 @@ class MainActivity : FlutterActivity() {
                             )
                         }
                         result.success(null)
+                    }
+
+                    "serviceLocation" -> {
+                        // Adds/removes the "location" type while an SOS shares
+                        // live location, so updates continue with the screen off.
+                        val on = call.argument<Boolean>("on") ?: false
+                        if (MeshForegroundService.running) {
+                            startService(
+                                Intent(this, MeshForegroundService::class.java)
+                                    .putExtra(MeshForegroundService.EXTRA_LOCATION, on)
+                            )
+                        }
+                        result.success(null)
+                    }
+
+                    // ── location (SOS) ───────────────────────────────────
+                    "locEnabled" -> result.success(location.enabled())
+
+                    "locLast" -> result.success(location.lastKnown())
+
+                    "locCurrent" -> {
+                        val timeout = (call.argument<Int>("timeoutMs") ?: 15000).toLong()
+                        location.current(timeout) { fix -> result.success(fix) }
+                    }
+
+                    "openMap" -> {
+                        val lat = call.argument<Double>("lat")
+                        val lon = call.argument<Double>("lon")
+                        val label = call.argument<String>("label") ?: "SOS"
+                        result.success(lat != null && lon != null && location.openMap(lat, lon, label))
                     }
 
                     "serviceMic" -> {

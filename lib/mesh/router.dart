@@ -96,8 +96,12 @@ class MeshRouter {
   /// Packet types replayed to new neighbours (store-and-forward).
   /// Announcements go stale, media chunks are too heavy to replay,
   /// call signalling is only meaningful live.
-  static bool _replayable(String type) =>
-      type != PacketType.ann && type != PacketType.blob && type != PacketType.call;
+  /// Store-and-forward: not for announces, calls and media chunks, except
+  /// an SOS voice clip (a few chunks), so phones arriving later still get it.
+  static bool _replayable(Packet p) =>
+      p.type != PacketType.ann &&
+      p.type != PacketType.call &&
+      (p.type != PacketType.blob || p.body['sos'] == 1);
 
   Timer? _sweeper;
 
@@ -116,7 +120,7 @@ class MeshRouter {
   /// Originate a packet from this phone.
   void send(Packet p) {
     _markSeen(p.id);
-    if (_replayable(p.type)) _remember(p);
+    if (_replayable(p)) _remember(p);
     for (final link in transport.links) {
       _enqueue(link, p);
     }
@@ -148,7 +152,7 @@ class MeshRouter {
 
     if (p.ttl > 1) {
       final fwd = p.forwarded();
-      if (_replayable(fwd.type)) _remember(fwd);
+      if (_replayable(fwd)) _remember(fwd);
       for (final other in transport.links) {
         if (other != link) _enqueue(other, fwd);
       }
@@ -196,9 +200,8 @@ class MeshRouter {
   void _enqueue(String link, Packet p) {
     final q = _queues.putIfAbsent(link, () => []);
     q.add(_Queued(p.priority, _seq++, p.encode()));
-    q.sort((a, b) => a.priority != b.priority
-        ? a.priority - b.priority
-        : a.seq - b.seq);
+    q.sort((a, b) =>
+        a.priority != b.priority ? a.priority - b.priority : a.seq - b.seq);
     if (q.length > 500) q.removeLast(); // never let a dead link eat memory
     // Start the pump on the next microtask, so a burst of enqueues (e.g. the
     // store-and-forward replay) is fully sorted before the first send.
@@ -262,5 +265,6 @@ class _Queued {
   final int priority;
   final int seq;
   final Uint8List bytes;
+
   _Queued(this.priority, this.seq, this.bytes);
 }

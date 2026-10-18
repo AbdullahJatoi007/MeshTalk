@@ -1,4 +1,5 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!-- Bluetooth / Wi-Fi / location permissions for Nearby Connections are
          declared by the nearby_connections plugin and merged in automatically
@@ -18,6 +19,14 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+
+    <!-- SOS live location (GPS works offline). The nearby_connections plugin
+         declares precise location only for Android 10+; tools:node="replace"
+         makes it available on every version (needed for GPS on Android 9). -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" tools:node="replace" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" tools:node="replace" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <uses-feature android:name="android.hardware.location.gps" android:required="false" />
 
     <application
         android:label="MeshTalk"
@@ -44,7 +53,7 @@
         <service
             android:name=".MeshForegroundService"
             android:exported="false"
-            android:foregroundServiceType="connectedDevice|microphone" />
+            android:foregroundServiceType="connectedDevice|microphone|location" />
 
         <meta-data
             android:name="flutterEmbedding"

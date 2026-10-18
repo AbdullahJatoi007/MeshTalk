@@ -70,11 +70,35 @@ class NativeBridge {
   static Future<void> serviceMic(bool on) =>
       _invoke<void>('serviceMic', {'on': on});
 
+  /// Adds the location type to the service while an SOS shares live location.
+  static Future<void> serviceLocation(bool on) =>
+      _invoke<void>('serviceLocation', {'on': on});
+
   /// Posts a notification (used for SOS, private messages, calls).
   static Future<void> notify(String title, String body,
           {bool urgent = false}) =>
       _invoke<void>(
           'notify', {'title': title, 'body': body, 'urgent': urgent});
+
+  // ── location (SOS) ──────────────────────────────────────────────────
+
+  /// Whether GPS or network location is switched on.
+  static Future<bool> locEnabled() async =>
+      await _invoke<bool>('locEnabled') ?? false;
+
+  /// Last cached position, instantly (may be old or null).
+  static Future<GeoFix?> locLast() async =>
+      GeoFix.fromMap(await _invoke<Map>('locLast'));
+
+  /// A fresh position: waits up to [timeoutMs] for a fix accurate to ~30 m,
+  /// otherwise returns the best fix seen (or the cached one, or null).
+  static Future<GeoFix?> locCurrent({int timeoutMs = 15000}) async =>
+      GeoFix.fromMap(await _invoke<Map>('locCurrent', {'timeoutMs': timeoutMs}));
+
+  /// Opens a position in the phone's maps app. False if nothing could open it.
+  static Future<bool> openMap(double lat, double lon, {String label = 'SOS'}) async =>
+      await _invoke<bool>('openMap', {'lat': lat, 'lon': lon, 'label': label}) ??
+      false;
 
   // ── voice messages ──────────────────────────────────────────────────
 
@@ -136,5 +160,27 @@ class NativeBridge {
         'Check MainActivity.kt is the MeshTalk version in your package folder, '
         'then stop the app and run "flutter run" again '
         '(hot restart does not reload Kotlin code).');
+  }
+}
+
+/// One GPS / network position.
+class GeoFix {
+  final double lat, lon;
+
+  /// Accuracy radius in metres (0 = unknown).
+  final double acc;
+
+  /// When the fix was taken (ms since epoch).
+  final int ts;
+
+  const GeoFix(this.lat, this.lon, this.acc, this.ts);
+
+  static GeoFix? fromMap(Map? m) {
+    if (m == null) return null;
+    final lat = (m['lat'] as num?)?.toDouble();
+    final lon = (m['lon'] as num?)?.toDouble();
+    if (lat == null || lon == null) return null;
+    return GeoFix(lat, lon, (m['acc'] as num?)?.toDouble() ?? 0,
+        (m['ts'] as num?)?.toInt() ?? DateTime.now().millisecondsSinceEpoch);
   }
 }

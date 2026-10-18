@@ -6,11 +6,13 @@ import '../mesh/router.dart';
 import '../platform/native_bridge.dart';
 import '../platform/permissions.dart';
 import 'dm_screen.dart';
+import 'sos_sheet.dart';
 import 'theme.dart';
 import 'widgets.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key, required this.mesh});
+
   final MeshService mesh;
 
   @override
@@ -52,7 +54,8 @@ class _HomeScreenState extends State<HomeScreen> {
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        scrollable: true, // keyboard opens over the dialog: let it scroll, not overflow
+        scrollable: true,
+        // keyboard opens over the dialog: let it scroll, not overflow
         icon: const Icon(Icons.sos, color: kSosRed, size: 40),
         title: const Text('Send SOS to everyone?'),
         content: Column(
@@ -60,8 +63,9 @@ class _HomeScreenState extends State<HomeScreen> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             const Text(
-                'Every phone in the mesh gets an alert and relays it before any other message. '
-                'Say where you are.'),
+                'Every phone in the mesh gets an alert and relays it before any other message.\n\n'
+                'Then MeshTalk records a 10-second voice message and shares your live '
+                'location for 15 minutes, so people nearby can find you.'),
             const SizedBox(height: 12),
             TextField(
               controller: ctrl,
@@ -70,12 +74,15 @@ class _HomeScreenState extends State<HomeScreen> {
               maxLength: 300,
               autofocus: true,
               textCapitalization: TextCapitalization.sentences,
-              decoration: const InputDecoration(hintText: 'e.g. Injured near the main gate'),
+              decoration: const InputDecoration(
+                  hintText: 'e.g. Injured near the main gate'),
             ),
           ],
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
           FilledButton(
             style: FilledButton.styleFrom(backgroundColor: kSosRed),
             onPressed: () => Navigator.pop(ctx, true),
@@ -86,11 +93,51 @@ class _HomeScreenState extends State<HomeScreen> {
     );
     // (controller not disposed here: the dialog's closing animation still uses it)
     final text = ctrl.text;
-    if (ok == true) {
-      mesh.sendSos(text.trim().isEmpty ? 'I need help' : text);
-      setState(() => _tab = 0);
+    if (ok != true) return;
+
+    // 1. The text alert goes out first, instantly (with the last known
+    //    position if there's a recent one).
+    final sid = await mesh.sendSos(text.trim().isEmpty ? 'I need help' : text);
+    if (!mounted) return;
+    setState(() => _tab = 0);
+    if (sid == null) return;
+
+    // 2. Location + microphone, asked together.
+    final perms = await requestSosPermissions();
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    if (perms.location) {
+      mesh.startLiveLocation(sid);
+      if (!await NativeBridge.locEnabled()) {
+        messenger.showSnackBar(const SnackBar(
+            content: Text(
+                'Turn on Location (GPS) so people can see where you are.')));
+      }
+    } else {
+      messenger.showSnackBar(const SnackBar(
+          content: Text(
+              'SOS sent without your location: location permission was denied.')));
+    }
+    if (!mounted) return;
+
+    // 3. 10-second voice message.
+    if (!perms.microphone) {
+      messenger.showSnackBar(const SnackBar(
+          content:
+              Text('No voice message: microphone permission was denied.')));
+      return;
+    }
+    final clip = await showSosRecorder(context);
+    if (clip == null) return;
+    try {
+      await mesh.sendSosVoice(sid, clip.path, clip.durMs);
+    } catch (e) {
+      if (mounted) showError(context, e);
     }
   }
+
+  String _until(DateTime t) =>
+      '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
 
   @override
   Widget build(BuildContext context) {
@@ -112,10 +159,13 @@ class _HomeScreenState extends State<HomeScreen> {
             title: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text('MeshTalk', maxLines: 1, overflow: TextOverflow.ellipsis),
+                const Text('MeshTalk',
+                    maxLines: 1, overflow: TextOverflow.ellipsis),
                 Row(
                   children: [
-                    _Dot(on: mesh.running && mesh.linkCount > 0, searching: mesh.running),
+                    _Dot(
+                        on: mesh.running && mesh.linkCount > 0,
+                        searching: mesh.running),
                     const SizedBox(width: 6),
                     Flexible(
                       child: Text(
@@ -163,26 +213,38 @@ class _HomeScreenState extends State<HomeScreen> {
                 itemBuilder: (_) => [
                   PopupMenuItem(
                       value: 'toggle',
-                      child: Text(mesh.running ? 'Turn mesh off' : 'Turn mesh on')),
+                      child: Text(
+                          mesh.running ? 'Turn mesh off' : 'Turn mesh on')),
                   CheckedPopupMenuItem(
                     value: 'bitchat',
                     checked: mesh.bitchatEnabled,
                     child: const Text('Talk with bitchat users'),
                   ),
-                  const PopupMenuItem(value: 'clear', child: Text('Clear message history')),
+                  const PopupMenuItem(
+                      value: 'clear', child: Text('Clear message history')),
                 ],
               ),
             ],
           ),
           body: Column(
             children: [
-              if (mesh.sosAlert != null) _SosBanner(m: mesh.sosAlert!, onDismiss: mesh.dismissSos),
+              if (mesh.sosAlert != null)
+                _SosBanner(m: mesh.sosAlert!, onDismiss: mesh.dismissSos),
+              if (mesh.liveSosId != null)
+                _Notice(
+                  text: '📍 Sharing your live location with the mesh'
+                      '${mesh.liveUntil != null ? ' until ${_until(mesh.liveUntil!)}' : ''}',
+                  action: 'Stop',
+                  onAction: () async => mesh.stopLiveLocation(),
+                ),
               if (!NativeBridge.available && !_hideNativeNotice)
                 _Notice(
-                  text: 'Background mode is off: the app\'s Android code is out of date. '
+                  text:
+                      'Background mode is off: the app\'s Android code is out of date. '
                       'Stop the app and run a full rebuild (flutter run), not a hot restart.',
                   action: 'OK',
-                  onAction: () async => setState(() => _hideNativeNotice = true),
+                  onAction: () async =>
+                      setState(() => _hideNativeNotice = true),
                 ),
               if (_blocker != null)
                 _Notice(
@@ -197,10 +259,13 @@ class _HomeScreenState extends State<HomeScreen> {
                   },
                 )
               else if (mesh.lastError != null && mesh.linkCount == 0)
-                _Notice(text: mesh.lastError!, action: 'Retry', onAction: () async {
-                  await mesh.stop();
-                  await _startMesh();
-                }),
+                _Notice(
+                    text: mesh.lastError!,
+                    action: 'Retry',
+                    onAction: () async {
+                      await mesh.stop();
+                      await _startMesh();
+                    }),
               Expanded(
                 child: IndexedStack(
                   index: _tab,
@@ -239,19 +304,26 @@ class _HomeScreenState extends State<HomeScreen> {
 
 class _Dot extends StatelessWidget {
   const _Dot({required this.on, required this.searching});
+
   final bool on, searching;
+
   @override
   Widget build(BuildContext context) {
     final c = on ? Colors.green : (searching ? Colors.amber : Colors.grey);
     return Container(
-        width: 8, height: 8, decoration: BoxDecoration(color: c, shape: BoxShape.circle));
+        width: 8,
+        height: 8,
+        decoration: BoxDecoration(color: c, shape: BoxShape.circle));
   }
 }
 
 class _Notice extends StatelessWidget {
-  const _Notice({required this.text, required this.action, required this.onAction});
+  const _Notice(
+      {required this.text, required this.action, required this.onAction});
+
   final String text, action;
   final Future<void> Function() onAction;
+
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
@@ -261,7 +333,9 @@ class _Notice extends StatelessWidget {
         padding: const EdgeInsets.fromLTRB(16, 10, 8, 10),
         child: Row(
           children: [
-            Expanded(child: Text(text, style: TextStyle(color: cs.onTertiaryContainer))),
+            Expanded(
+                child: Text(text,
+                    style: TextStyle(color: cs.onTertiaryContainer))),
             TextButton(onPressed: onAction, child: Text(action)),
           ],
         ),
@@ -272,8 +346,10 @@ class _Notice extends StatelessWidget {
 
 class _SosBanner extends StatelessWidget {
   const _SosBanner({required this.m, required this.onDismiss});
+
   final ChatMessage m;
   final VoidCallback onDismiss;
+
   @override
   Widget build(BuildContext context) {
     return Material(
@@ -291,13 +367,30 @@ class _SosBanner extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('SOS from ${m.fromName} · ${m.hops} hop${m.hops == 1 ? '' : 's'} away',
+                    Text(
+                        'SOS from ${m.fromName} · ${m.hops} hop${m.hops == 1 ? '' : 's'} away',
                         style: const TextStyle(
                             color: Colors.white, fontWeight: FontWeight.w700)),
                     Text(m.text,
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(color: Colors.white)),
+                    if (m.hasLocation)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: OutlinedButton.icon(
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: Colors.white,
+                            side: const BorderSide(color: Colors.white),
+                            visualDensity: VisualDensity.compact,
+                          ),
+                          onPressed: () =>
+                              openLocation(context, m.lat!, m.lon!, m.fromName),
+                          icon: const Icon(Icons.place, size: 18),
+                          label: Text('Open location · ${locationDetail(m)}',
+                              maxLines: 1, overflow: TextOverflow.ellipsis),
+                        ),
+                      ),
                   ],
                 ),
               ),
@@ -314,6 +407,7 @@ class _SosBanner extends StatelessWidget {
 
 class _PublicChat extends StatelessWidget {
   const _PublicChat({required this.mesh});
+
   final MeshService mesh;
 
   @override
@@ -332,7 +426,8 @@ class _PublicChat extends StatelessWidget {
                   reverse: true,
                   padding: const EdgeInsets.symmetric(vertical: 8),
                   itemCount: feed.length,
-                  itemBuilder: (_, i) => MessageBubble(m: feed[feed.length - 1 - i]),
+                  itemBuilder: (_, i) =>
+                      MessageBubble(m: feed[feed.length - 1 - i]),
                 ),
         ),
         Composer(
@@ -349,12 +444,13 @@ class _PublicChat extends StatelessWidget {
 
 class _People extends StatelessWidget {
   const _People({required this.mesh, required this.peers});
+
   final MeshService mesh;
   final List<PeerInfo> peers;
 
   void _open(BuildContext context, String id) {
-    Navigator.of(context).push(MaterialPageRoute(
-        builder: (_) => DmScreen(mesh: mesh, peerId: id)));
+    Navigator.of(context).push(
+        MaterialPageRoute(builder: (_) => DmScreen(mesh: mesh, peerId: id)));
   }
 
   @override
@@ -365,7 +461,8 @@ class _People extends StatelessWidget {
       return const _Empty(
         icon: Icons.radar,
         title: 'Looking for people nearby',
-        body: 'Phones running MeshTalk within about 100 m connect automatically. '
+        body:
+            'Phones running MeshTalk within about 100 m connect automatically. '
             'People further away appear once someone in between joins.',
       );
     }
@@ -381,7 +478,8 @@ class _People extends StatelessWidget {
             trailing: _Unread(n: mesh.unreadDm[p.nodeId] ?? 0, hops: p.hops),
             onTap: () => _open(context, p.nodeId),
           ),
-        if (bitchat.isNotEmpty || (mesh.bitchatEnabled && mesh.bitchatProblem != null)) ...[
+        if (bitchat.isNotEmpty ||
+            (mesh.bitchatEnabled && mesh.bitchatProblem != null)) ...[
           const Padding(
             padding: EdgeInsets.fromLTRB(16, 16, 16, 4),
             child: Text('On bitchat (public chat only)'),
@@ -419,7 +517,8 @@ class _People extends StatelessWidget {
                   opacity: 0.5,
                   child: Avatar(id: m.peerId!, name: mesh.nameFor(m.peerId!))),
               title: Text(mesh.nameFor(m.peerId!)),
-              subtitle: Text(m.preview, maxLines: 1, overflow: TextOverflow.ellipsis),
+              subtitle:
+                  Text(m.preview, maxLines: 1, overflow: TextOverflow.ellipsis),
               trailing: _Unread(n: mesh.unreadDm[m.peerId!] ?? 0),
               onTap: () => _open(context, m.peerId!),
             ),
@@ -431,8 +530,10 @@ class _People extends StatelessWidget {
 
 class _Unread extends StatelessWidget {
   const _Unread({required this.n, this.hops});
+
   final int n;
   final int? hops;
+
   @override
   Widget build(BuildContext context) {
     if (n > 0) return Badge(label: Text('$n'));
@@ -452,8 +553,10 @@ class _Unread extends StatelessWidget {
 
 class _Empty extends StatelessWidget {
   const _Empty({required this.icon, required this.title, required this.body});
+
   final IconData icon;
   final String title, body;
+
   @override
   Widget build(BuildContext context) {
     final t = Theme.of(context);
@@ -467,7 +570,8 @@ class _Empty extends StatelessWidget {
             const SizedBox(height: 12),
             Text(title, style: t.textTheme.titleMedium),
             const SizedBox(height: 6),
-            Text(body, textAlign: TextAlign.center, style: t.textTheme.bodyMedium),
+            Text(body,
+                textAlign: TextAlign.center, style: t.textTheme.bodyMedium),
           ],
         ),
       ),
